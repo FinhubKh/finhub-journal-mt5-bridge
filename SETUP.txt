@@ -7,9 +7,16 @@ Prerequisites
   - Portable or installed MetaTrader 5 terminal (note path to terminal64.exe)
 
 Redis
-  Install and run Redis locally on the VPS. Do not expose Redis to the public internet.
+  Install and run Redis locally on the VPS. Redis must stay on the same host as the bridge
+  (127.0.0.1). Do not expose Redis to the public internet.
   Job queue payloads may contain investor passwords briefly while workers process sync jobs.
   Bind Redis to 127.0.0.1 and restrict firewall access to trusted hosts only.
+
+Delivery semantics (v1)
+  Sync jobs are at-most-once if a worker hard-crashes mid-job (the job is already removed
+  from the queue and is not recovered). Transient worker exceptions may requeue once
+  (attempt counter on the job payload). Successful or handled failures (bad credentials,
+  empty history) are not retried automatically.
 
 MetaTrader 5
   Install MT5 and log in once if the terminal requires it. Set MT5_TERMINAL_PATH in .env
