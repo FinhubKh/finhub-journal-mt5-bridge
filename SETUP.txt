@@ -37,8 +37,8 @@ Configuration
 
 Run API (accepts sync jobs from journal)
   .venv\Scripts\activate
-  uvicorn app.main:app --host %BRIDGE_API_HOST% --port %BRIDGE_API_PORT%
-  Or set BRIDGE_API_HOST and BRIDGE_API_PORT in .env and use those values.
+  python -m uvicorn app.main:app --host 0.0.0.0 --port 8788
+  On Windows you may instead use BRIDGE_API_HOST and BRIDGE_API_PORT from .env.
 
 Run worker pool (MT5 sync processors)
   Open a second terminal, same venv:
