@@ -1,0 +1,41 @@
+FinHubKh MT5 Bridge - Windows VPS setup
+
+Prerequisites
+  - Windows Server or VPS with admin access
+  - Python 3.11 (add to PATH)
+  - Redis for Windows (Memurai, Redis Stack MSI, or WSL Redis bound to 127.0.0.1 only)
+  - Portable or installed MetaTrader 5 terminal (note path to terminal64.exe)
+
+Redis
+  Install and run Redis locally on the VPS. Do not expose Redis to the public internet.
+  Job queue payloads may contain investor passwords briefly while workers process sync jobs.
+  Bind Redis to 127.0.0.1 and restrict firewall access to trusted hosts only.
+
+MetaTrader 5
+  Install MT5 and log in once if the terminal requires it. Set MT5_TERMINAL_PATH in .env
+  to the full path of terminal64.exe (use doubled backslashes in .env).
+
+Python dependencies
+  cd finhubkh-mt5-bridge
+  python -m venv .venv
+  .venv\Scripts\activate
+  pip install -r requirements.txt
+  pip install MetaTrader5==5.0.45
+
+Configuration
+  Copy .env.example to .env and fill in values:
+    BRIDGE_SERVICE_TOKEN - shared secret with finhubkh_journal (openssl rand -hex 32)
+    JOURNAL_BRIDGE_SYNC_URL - journal API URL for posting sync results
+    REDIS_URL, MT5_TERMINAL_PATH, WORKER_POOL_SIZE, HISTORY_LOOKBACK_DAYS, etc.
+
+Run API (accepts sync jobs from journal)
+  .venv\Scripts\activate
+  uvicorn app.main:app --host %BRIDGE_API_HOST% --port %BRIDGE_API_PORT%
+  Or set BRIDGE_API_HOST and BRIDGE_API_PORT in .env and use those values.
+
+Run worker pool (MT5 sync processors)
+  Open a second terminal, same venv:
+  python -m workers.supervisor
+
+Keep Redis, the API process, and the worker supervisor running under your process manager
+or Windows Service wrapper of choice.
