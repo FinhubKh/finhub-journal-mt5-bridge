@@ -63,6 +63,27 @@ Windows host worker (MT5)
   Start the worker pool (keep this process running):
     python -m workers.supervisor
 
+New broker servers (one-time step per broker)
+  MT5's automated initialize() only connects instantly to servers the terminal
+  already has cached (bundled defaults, or anything logged into via the GUI
+  before). A server it has never seen just hangs to MT5_INIT_TIMEOUT_MS and
+  fails with "IPC timeout" — this looks identical whether the server name is
+  wrong or simply not yet cached, and happens even for a correctly-spelled
+  real broker server.
+
+  The first time an investor connects a broker this bridge hasn't synced
+  before, do this once on the Windows host:
+    1. Open the MT5 terminal (it runs hidden — un-hide it, or launch a fresh
+       instance from MT5_TERMINAL_PATH).
+    2. File -> Login to Trade Account -> type the broker name in the Server
+       field and use MT5's live search to find the exact server string.
+    3. Log in with any valid account on that server (their real credentials
+       work fine).
+  After that one manual login, the server is cached and every future
+  automated sync/verify job for that broker connects in well under a second
+  — no code change needed, and it doesn't need repeating for other accounts
+  on the same broker/server.
+
 Performance notes
   - Duplicate sync requests for the same trading_account_id are coalesced while pending.
   - A Redis lock (MT5_LOCK_KEY) ensures only one worker drives MetaTrader at a time.
