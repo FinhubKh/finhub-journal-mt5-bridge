@@ -35,6 +35,13 @@ def enqueue_job(redis_client, queue_key: str, job: dict) -> str:
     return payload["job_id"]
 
 
+def queue_depth(redis_client, queue_key: str) -> dict:
+    return {
+        "pending_jobs": redis_client.llen(queue_key),
+        "pending_accounts": redis_client.scard(_pending_key(queue_key)),
+    }
+
+
 def claim_job(redis_client, queue_key: str, timeout: int = 5):
     """Claim the next job marker and resolve the latest coalesced payload."""
     item = redis_client.blpop(queue_key, timeout=timeout)

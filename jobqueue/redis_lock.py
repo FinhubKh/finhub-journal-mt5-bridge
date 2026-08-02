@@ -2,6 +2,10 @@ import time
 import uuid
 
 
+def lock_held(redis_client, key: str) -> bool:
+    return bool(redis_client.get(key))
+
+
 class RedisLock:
     """Simple Redis NX lock so only one process drives the MT5 terminal at a time."""
 
