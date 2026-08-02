@@ -123,7 +123,10 @@ def record_sync_error(
         supabase_url=supabase_url,
         service_key=service_key,
         trading_account_id=trading_account_id,
-        payload={"last_sync_error": str(error)[:500]},
+        payload={
+            "last_sync_error": str(error)[:500],
+            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        },
     )
 
 
@@ -135,6 +138,9 @@ def _patch_investor_credentials(
     trading_account_id: str,
     payload: dict,
 ) -> None:
+    body = dict(payload)
+    if "updated_at" not in body:
+        body["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     url = (
         f"{supabase_url.rstrip('/')}/rest/v1/investor_credentials"
         f"?trading_account_id=eq.{trading_account_id}"
@@ -142,7 +148,7 @@ def _patch_investor_credentials(
     res = client.patch(
         url,
         headers=supabase_headers(service_key),
-        json=payload,
+        json=body,
         timeout=30.0,
     )
     # Credentials row may not exist yet in some edge cases — don't crash workers.
