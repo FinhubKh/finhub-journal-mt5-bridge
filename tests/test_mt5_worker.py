@@ -188,6 +188,68 @@ def test_worker_uses_incremental_window_after_prior_sync():
     assert abs((mt5.seen_date_from - expected_from).total_seconds()) < 2
 
 
+def test_worker_reports_never_traded_on_first_sync_with_no_deals():
+    client = httpx.Client(transport=_supabase_transport())  # no last_synced_at -> first sync
+    result = run_sync_job(
+        job={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
+        mt5=FakeMt5(),
+        http=client,
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
+        terminal_path="C:/mt5/terminal64.exe",
+        lookback_days=90,
+        redis_client=FakeLockRedis(),
+        lock_wait_seconds=1,
+    )
+    assert result == {"ok": False, "error": "no_trades"}
+
+
+def test_worker_reports_no_new_trades_on_incremental_sync_with_no_deals():
+    from datetime import datetime, timedelta, timezone
+
+    last_synced_at = datetime.now(timezone.utc) - timedelta(days=1)
+    client = httpx.Client(
+        transport=_supabase_transport(
+            last_synced_at=last_synced_at.isoformat().replace("+00:00", "Z")
+        )
+    )
+    result = run_sync_job(
+        job={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
+        mt5=FakeMt5(),
+        http=client,
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
+        terminal_path="C:/mt5/terminal64.exe",
+        lookback_days=90,
+        redis_client=FakeLockRedis(),
+        lock_wait_seconds=1,
+    )
+    assert result == {"ok": False, "error": "no_new_trades"}
+
+
+def test_worker_falls_back_to_generic_no_trades_message_when_lookup_fails():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/investor_credentials") and request.method == "GET":
+            return httpx.Response(500)
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    result = run_sync_job(
+        job={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
+        mt5=FakeMt5(),
+        http=client,
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
+        terminal_path="C:/mt5/terminal64.exe",
+        lookback_days=90,
+        redis_client=FakeLockRedis(),
+        lock_wait_seconds=1,
+    )
+    # Credentials lookup blew up (500) -> can't tell first vs incremental, but
+    # the sync itself still completes and reports the generic no-trades result.
+    assert result == {"ok": False, "error": "no_trades"}
+
+
 def test_worker_records_error_on_login_fail():
     seen = {}
 

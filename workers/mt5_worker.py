@@ -14,6 +14,11 @@ LOGIN_FAILED_MSG = "Login failed — check broker server, MT5 login, and investo
 INCREMENTAL_SYNC_OVERLAP_HOURS = 24
 
 
+NO_TRADES_EVER_MSG = "No trade history found — this account hasn't placed any trades yet"
+NO_NEW_TRADES_MSG = "No new trades since last sync"
+NO_TRADES_UNKNOWN_MSG = "No closed trades found in lookback window"
+
+
 def _resolve_sync_window(
     http: httpx.Client,
     *,
@@ -21,7 +26,14 @@ def _resolve_sync_window(
     service_key: str,
     trading_account_id: str,
     lookback_days: int,
-) -> tuple[datetime, datetime]:
+) -> tuple[datetime, datetime, str]:
+    """Returns (date_from, date_to, sync_kind).
+
+    sync_kind is "first" (no prior successful sync on record), "incremental"
+    (there is a last_synced_at to pull forward from), or "unknown" (the
+    credentials lookup itself failed, so we can't tell which — falls back
+    to the full lookback window either way).
+    """
     date_to = datetime.now(timezone.utc)
     full_history_from = date_to - timedelta(days=lookback_days)
     try:
@@ -35,11 +47,10 @@ def _resolve_sync_window(
         if last_synced_at:
             since = datetime.fromisoformat(str(last_synced_at).replace("Z", "+00:00"))
             date_from = since - timedelta(hours=INCREMENTAL_SYNC_OVERLAP_HOURS)
-            return max(date_from, full_history_from), date_to
+            return max(date_from, full_history_from), date_to, "incremental"
+        return full_history_from, date_to, "first"
     except Exception:
-        pass
-    # First sync (or credentials lookup failed) — fall back to the full window.
-    return full_history_from, date_to
+        return full_history_from, date_to, "unknown"
 
 
 def _mt5_error_detail(mt5) -> str:
@@ -174,6 +185,7 @@ def run_sync_job(
     lock = None
     deals = None
     login_ok = False
+    sync_kind = "unknown"
     try:
         if redis_client is not None:
             lock = RedisLock(
@@ -199,7 +211,7 @@ def run_sync_job(
             )
             error_detail = "" if login_ok else _mt5_error_detail(mt5)
             if login_ok:
-                date_from, date_to = _resolve_sync_window(
+                date_from, date_to, sync_kind = _resolve_sync_window(
                     http,
                     supabase_url=supabase_url,
                     service_key=service_key,
@@ -229,7 +241,10 @@ def run_sync_job(
 
         trades = deals_to_trades(deals or [])
         if not trades:
-            msg = "No closed trades found in lookback window"
+            msg, error_code = {
+                "first": (NO_TRADES_EVER_MSG, "no_trades"),
+                "incremental": (NO_NEW_TRADES_MSG, "no_new_trades"),
+            }.get(sync_kind, (NO_TRADES_UNKNOWN_MSG, "no_trades"))
             record_sync_error(
                 http,
                 supabase_url=supabase_url,
@@ -237,7 +252,7 @@ def run_sync_job(
                 trading_account_id=trading_account_id,
                 error=msg,
             )
-            return {"ok": False, "error": "no_trades"}
+            return {"ok": False, "error": error_code}
 
         saved = upsert_trades(
             http,
