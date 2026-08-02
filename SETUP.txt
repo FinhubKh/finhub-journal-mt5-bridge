@@ -55,6 +55,7 @@ Windows host worker (MT5)
   .venv\Scripts\activate
   pip install -r requirements.txt
   pip install MetaTrader5==5.0.45
+  pip install pywin32 psutil   # used to hide the MT5 terminal window (best-effort)
 
   Confirm Redis from the host:
     (optional) redis-cli -h 127.0.0.1 ping

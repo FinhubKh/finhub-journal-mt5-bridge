@@ -5,5 +5,8 @@ httpx==0.28.1
 pydantic-settings==2.7.1
 pytest==8.3.4
 pytest-asyncio==0.25.0
-# MetaTrader5 is Windows-only; install on the VPS:
+# Windows-only — install on the host, not in the Docker image (workers/ isn't
+# copied into the API container, and pywin32 has no Linux wheel):
 # MetaTrader5==5.0.45
+# pywin32
+# psutil
