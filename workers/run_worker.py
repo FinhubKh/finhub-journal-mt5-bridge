@@ -3,7 +3,7 @@ import httpx
 from app.config import get_settings
 from jobqueue.redis_client import make_redis
 from jobqueue.redis_queue import claim_job, enqueue_job
-from workers.mt5_worker import run_sync_job
+from workers.mt5_worker import run_sync_job, run_verify_job
 
 
 def _http_client() -> httpx.Client:
@@ -29,21 +29,34 @@ def main() -> None:
             job = claim_job(client, settings.redis_queue_key, timeout=5)
             if not job:
                 continue
+            job_type = str(job.get("job_type") or "sync")
             try:
-                result = run_sync_job(
-                    job=job,
-                    mt5=mt5,
-                    http=http,
-                    supabase_url=settings.supabase_url,
-                    service_key=settings.supabase_service_role_key,
-                    terminal_path=settings.mt5_terminal_path,
-                    lookback_days=settings.history_lookback_days,
-                    redis_client=client,
-                    lock_key=settings.mt5_lock_key,
-                    lock_ttl_seconds=settings.mt5_lock_ttl_seconds,
-                    lock_wait_seconds=settings.mt5_lock_wait_seconds,
-                )
-                if result.get("error") == "mt5_lock_timeout":
+                if job_type == "verify":
+                    result = run_verify_job(
+                        job=job,
+                        mt5=mt5,
+                        redis_client=client,
+                        terminal_path=settings.mt5_terminal_path,
+                        queue_key=settings.redis_queue_key,
+                        lock_key=settings.mt5_lock_key,
+                        lock_ttl_seconds=settings.mt5_lock_ttl_seconds,
+                        lock_wait_seconds=settings.mt5_lock_wait_seconds,
+                    )
+                else:
+                    result = run_sync_job(
+                        job=job,
+                        mt5=mt5,
+                        http=http,
+                        supabase_url=settings.supabase_url,
+                        service_key=settings.supabase_service_role_key,
+                        terminal_path=settings.mt5_terminal_path,
+                        lookback_days=settings.history_lookback_days,
+                        redis_client=client,
+                        lock_key=settings.mt5_lock_key,
+                        lock_ttl_seconds=settings.mt5_lock_ttl_seconds,
+                        lock_wait_seconds=settings.mt5_lock_wait_seconds,
+                    )
+                if result.get("error") == "mt5_lock_timeout" and job_type != "verify":
                     # Do not burn the retry budget — another worker was using MT5
                     enqueue_job(client, settings.redis_queue_key, job)
             except Exception:

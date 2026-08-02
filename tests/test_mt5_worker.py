@@ -1,7 +1,8 @@
 import httpx
 
 from jobqueue.redis_lock import RedisLock
-from workers.mt5_worker import run_sync_job
+from jobqueue.redis_queue import get_job_result
+from workers.mt5_worker import run_sync_job, run_verify_job
 
 
 class FakeMt5:
@@ -153,7 +154,7 @@ def test_worker_records_error_on_login_fail():
         lock_wait_seconds=1,
     )
     assert result["ok"] is False
-    assert "credentials" in seen["payload"]["last_sync_error"].lower()
+    assert "broker server" in seen["payload"]["last_sync_error"].lower()
 
 
 def test_worker_lock_timeout_without_mt5():
@@ -180,3 +181,65 @@ def test_redis_lock_roundtrip():
     assert r.get("k") == lock.token
     lock.release()
     assert r.get("k") is None
+
+
+class FakeResultRedis(FakeLockRedis):
+    def __init__(self, hold=False):
+        super().__init__(hold=hold)
+        self.ttls = {}
+
+    def setex(self, key, time, value):
+        self.kv[key] = value
+        self.ttls[key] = time
+        return True
+
+
+def test_verify_job_success_writes_result():
+    redis_client = FakeResultRedis()
+    result = run_verify_job(
+        job={
+            "job_id": "verify-1",
+            "job_type": "verify",
+            "trading_account_id": "a1",
+            "login": "1",
+            "password": "p",
+            "server": "S",
+        },
+        mt5=FakeMt5(),
+        redis_client=redis_client,
+        terminal_path="C:/mt5/terminal64.exe",
+        queue_key="q",
+        lock_key="lock",
+        lock_wait_seconds=1,
+    )
+    assert result == {"ok": True}
+    assert get_job_result(redis_client, "q", "verify-1") == {
+        "status": "done",
+        "ok": True,
+        "trading_account_id": "a1",
+    }
+
+
+def test_verify_job_fail_writes_generic_error():
+    redis_client = FakeResultRedis()
+    result = run_verify_job(
+        job={
+            "job_id": "verify-2",
+            "job_type": "verify",
+            "trading_account_id": "a1",
+            "login": "1",
+            "password": "bad",
+            "server": "S",
+        },
+        mt5=FakeMt5(fail_login=True),
+        redis_client=redis_client,
+        terminal_path="C:/mt5/terminal64.exe",
+        queue_key="q",
+        lock_key="lock",
+        lock_wait_seconds=1,
+    )
+    assert result["ok"] is False
+    stored = get_job_result(redis_client, "q", "verify-2")
+    assert stored["status"] == "done"
+    assert stored["ok"] is False
+    assert "broker server" in stored["error"].lower()

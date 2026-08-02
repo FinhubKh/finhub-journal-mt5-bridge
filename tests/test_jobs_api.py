@@ -40,6 +40,33 @@ class FakeRedis:
     def get(self, key):
         return self.kv.get(key)
 
+    def setex(self, key, time, value):
+        self.kv[key] = value
+        return True
+
+    def hget(self, key, field):
+        return (self.hashes.get(key) or {}).get(field)
+
+    def hdel(self, key, field):
+        h = self.hashes.get(key) or {}
+        if field not in h:
+            return 0
+        del h[field]
+        return 1
+
+    def srem(self, key, value):
+        s = self.sets.get(key) or set()
+        if value not in s:
+            return 0
+        s.remove(value)
+        return 1
+
+    def blpop(self, key, timeout=0):
+        items = self.lists.get(key) or []
+        if not items:
+            return None
+        return key, items.pop(0)
+
 
 def test_health():
     app = create_app(
@@ -130,3 +157,59 @@ def test_jobs_sync_enqueues():
     body = res.json()
     assert body["job_id"]
     assert len(fake.lists["q"]) == 1
+
+
+def test_jobs_verify_enqueues_and_marks_pending():
+    fake = FakeRedis()
+    app = create_app(
+        redis_client=fake,
+        settings_overrides={
+            "bridge_service_token": "tok",
+            "journal_bridge_sync_url": "http://journal/v1/bridge/sync",
+            "redis_queue_key": "q",
+        },
+    )
+    client = TestClient(app)
+    res = client.post(
+        "/jobs/verify",
+        headers={"x-bridge-token": "tok"},
+        json={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
+    )
+    assert res.status_code == 202
+    body = res.json()
+    assert body["job_id"]
+    assert len(fake.lists["q"]) == 1
+    pending = fake.kv[f"q:result:{body['job_id']}"]
+    assert '"pending"' in pending
+
+
+def test_jobs_result_returns_stored_payload():
+    fake = FakeRedis()
+    fake.setex("q:result:job-9", 300, '{"status":"done","ok":true}')
+    app = create_app(
+        redis_client=fake,
+        settings_overrides={
+            "bridge_service_token": "tok",
+            "journal_bridge_sync_url": "http://journal/v1/bridge/sync",
+            "redis_queue_key": "q",
+        },
+    )
+    client = TestClient(app)
+    res = client.get("/jobs/job-9/result", headers={"x-bridge-token": "tok"})
+    assert res.status_code == 200
+    assert res.json() == {"status": "done", "ok": True}
+
+
+def test_jobs_result_404_when_unknown():
+    fake = FakeRedis()
+    app = create_app(
+        redis_client=fake,
+        settings_overrides={
+            "bridge_service_token": "tok",
+            "journal_bridge_sync_url": "http://journal/v1/bridge/sync",
+            "redis_queue_key": "q",
+        },
+    )
+    client = TestClient(app)
+    res = client.get("/jobs/missing/result", headers={"x-bridge-token": "tok"})
+    assert res.status_code == 404

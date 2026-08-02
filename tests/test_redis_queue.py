@@ -1,4 +1,4 @@
-from jobqueue.redis_queue import enqueue_job, claim_job
+from jobqueue.redis_queue import enqueue_job, claim_job, get_job_result, set_job_result
 
 
 class FakeRedis:
@@ -7,6 +7,7 @@ class FakeRedis:
         self.sets = {}
         self.hashes = {}
         self.kv = {}
+        self.ttls = {}
 
     def rpush(self, key, value):
         self.lists.setdefault(key, []).append(value)
@@ -51,6 +52,13 @@ class FakeRedis:
         if nx and key in self.kv:
             return False
         self.kv[key] = value
+        if ex is not None:
+            self.ttls[key] = ex
+        return True
+
+    def setex(self, key, time, value):
+        self.kv[key] = value
+        self.ttls[key] = time
         return True
 
     def get(self, key):
@@ -58,6 +66,7 @@ class FakeRedis:
 
     def delete(self, key):
         self.kv.pop(key, None)
+        self.ttls.pop(key, None)
         return 1
 
 
@@ -108,3 +117,43 @@ def test_different_accounts_both_queued():
     assert len(r.lists["q"]) == 2
     ids = {claim_job(r, "q")["trading_account_id"], claim_job(r, "q")["trading_account_id"]}
     assert ids == {"a1", "a2"}
+
+
+def test_verify_and_sync_same_account_both_queued():
+    r = FakeRedis()
+    enqueue_job(
+        r,
+        "q",
+        {
+            "job_id": "sync-1",
+            "job_type": "sync",
+            "trading_account_id": "a1",
+            "login": "1",
+            "password": "p",
+            "server": "S",
+        },
+    )
+    enqueue_job(
+        r,
+        "q",
+        {
+            "job_id": "verify-1",
+            "job_type": "verify",
+            "trading_account_id": "a1",
+            "login": "1",
+            "password": "p",
+            "server": "S",
+        },
+    )
+    assert len(r.lists["q"]) == 2
+    types = {claim_job(r, "q")["job_type"], claim_job(r, "q")["job_type"]}
+    assert types == {"sync", "verify"}
+
+
+def test_job_result_roundtrip():
+    r = FakeRedis()
+    set_job_result(r, "q", "job-1", {"status": "pending"})
+    assert get_job_result(r, "q", "job-1") == {"status": "pending"}
+    set_job_result(r, "q", "job-1", {"status": "done", "ok": True})
+    assert get_job_result(r, "q", "job-1") == {"status": "done", "ok": True}
+    assert r.ttls["q:result:job-1"] == 300

@@ -7,12 +7,19 @@ from pydantic import BaseModel, Field
 
 from app.auth import token_ok
 from jobqueue.redis_lock import lock_held
-from jobqueue.redis_queue import enqueue_job, queue_depth
+from jobqueue.redis_queue import enqueue_job, get_job_result, queue_depth, set_job_result
 
 router = APIRouter()
 
 
 class SyncJobBody(BaseModel):
+    trading_account_id: str = Field(min_length=1)
+    login: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+    server: str = Field(min_length=1)
+
+
+class VerifyJobBody(BaseModel):
     trading_account_id: str = Field(min_length=1)
     login: str = Field(min_length=1)
     password: str = Field(min_length=1)
@@ -65,12 +72,54 @@ def create_sync_job(
     settings = request.app.state.settings
     if not token_ok(x_bridge_token or "", settings.bridge_service_token):
         raise HTTPException(status_code=401, detail="Invalid bridge token")
+    payload = body.model_dump()
+    payload["job_type"] = "sync"
     job_id = enqueue_job(
         request.app.state.redis,
         settings.redis_queue_key,
-        body.model_dump(),
+        payload,
     )
     return {"job_id": job_id}
+
+
+@router.post("/jobs/verify", status_code=202)
+def create_verify_job(
+    body: VerifyJobBody,
+    request: Request,
+    x_bridge_token: str | None = Header(default=None),
+):
+    settings = request.app.state.settings
+    if not token_ok(x_bridge_token or "", settings.bridge_service_token):
+        raise HTTPException(status_code=401, detail="Invalid bridge token")
+    payload = body.model_dump()
+    payload["job_type"] = "verify"
+    job_id = enqueue_job(
+        request.app.state.redis,
+        settings.redis_queue_key,
+        payload,
+    )
+    set_job_result(
+        request.app.state.redis,
+        settings.redis_queue_key,
+        job_id,
+        {"status": "pending", "trading_account_id": payload["trading_account_id"]},
+    )
+    return {"job_id": job_id}
+
+
+@router.get("/jobs/{job_id}/result")
+def job_result(
+    job_id: str,
+    request: Request,
+    x_bridge_token: str | None = Header(default=None),
+):
+    settings = request.app.state.settings
+    if not token_ok(x_bridge_token or "", settings.bridge_service_token):
+        raise HTTPException(status_code=401, detail="Invalid bridge token")
+    result = get_job_result(request.app.state.redis, settings.redis_queue_key, job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Unknown job")
+    return result
 
 
 def _badge(ok: bool | None) -> str:
