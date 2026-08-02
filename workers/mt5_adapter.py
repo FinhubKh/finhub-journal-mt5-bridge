@@ -1,8 +1,5 @@
 """Real MetaTrader5 adapter — import only on Windows VPS."""
 
-import os
-import time
-
 
 class MetaTrader5Adapter:
     def __init__(self):
@@ -11,7 +8,7 @@ class MetaTrader5Adapter:
         self._mt5 = mt5
 
     def initialize(self, path, login, password, server, timeout_ms=15000) -> bool:
-        ok = bool(
+        return bool(
             self._mt5.initialize(
                 path=path,
                 login=int(login),
@@ -20,52 +17,6 @@ class MetaTrader5Adapter:
                 timeout=timeout_ms,
             )
         )
-        if ok:
-            self._hide_terminal_window(path)
-        return ok
-
-    def _hide_terminal_window(self, path: str) -> None:
-        """Best-effort: hide the MT5 terminal window so it never pops up on screen.
-
-        MT5 has no official headless/silent-login flag, so this finds the
-        terminal's window(s) by process name and hides them via the Windows
-        API. Never allowed to affect login/sync — any failure here is swallowed.
-        """
-        try:
-            import psutil
-            import win32con
-            import win32gui
-            import win32process
-        except ImportError:
-            return
-
-        try:
-            exe_name = os.path.basename(path).lower()
-            pids = {
-                p.info["pid"]
-                for p in psutil.process_iter(["pid", "name"])
-                if (p.info.get("name") or "").lower() == exe_name
-            }
-            if not pids:
-                return
-
-            def _hide_visible(hwnd, hidden_any):
-                _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                if pid in pids and win32gui.IsWindowVisible(hwnd):
-                    win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
-                    hidden_any.append(True)
-                return True
-
-            # The window can take a moment to appear after initialize() returns,
-            # so poll briefly and stop once nothing is left visible to hide.
-            for attempt in range(6):
-                hidden_any: list = []
-                win32gui.EnumWindows(_hide_visible, hidden_any)
-                if not hidden_any and attempt > 0:
-                    break
-                time.sleep(0.25)
-        except Exception:
-            pass
 
     def last_error(self):
         return self._mt5.last_error()
