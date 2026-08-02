@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     redis_url: str = "redis://127.0.0.1:6379/0"
     redis_queue_key: str = "finhubkh:mt5:sync_jobs"
     mt5_terminal_path: str = ""
+    # Bound how long a single login attempt can hold the MT5 lock. MT5's own
+    # default is 60s, which lets one bad/unreachable broker starve every other
+    # queued verify/sync job behind the lock.
+    mt5_init_timeout_ms: int = 15000
     # Default 2: one worker can write DB while another holds the MT5 lock
     worker_pool_size: int = 2
     history_lookback_days: int = 90

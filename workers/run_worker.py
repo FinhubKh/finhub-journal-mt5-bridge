@@ -42,6 +42,7 @@ def main() -> None:
                         lock_key=settings.mt5_lock_key,
                         lock_ttl_seconds=settings.mt5_lock_ttl_seconds,
                         lock_wait_seconds=min(20, settings.mt5_lock_wait_seconds),
+                        init_timeout_ms=settings.mt5_init_timeout_ms,
                     )
                     if result.get("ok"):
                         # Queue trade pull after login works — don't make Connect wait on it.
@@ -62,6 +63,7 @@ def main() -> None:
                         lock_key=settings.mt5_lock_key,
                         lock_ttl_seconds=settings.mt5_lock_ttl_seconds,
                         lock_wait_seconds=settings.mt5_lock_wait_seconds,
+                        init_timeout_ms=settings.mt5_init_timeout_ms,
                     )
                 if result.get("error") == "mt5_lock_timeout" and job_type != "verify":
                     # Do not burn the retry budget — another worker was using MT5

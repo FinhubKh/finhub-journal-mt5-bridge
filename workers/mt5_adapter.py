@@ -7,15 +7,19 @@ class MetaTrader5Adapter:
 
         self._mt5 = mt5
 
-    def initialize(self, path, login, password, server) -> bool:
+    def initialize(self, path, login, password, server, timeout_ms=15000) -> bool:
         return bool(
             self._mt5.initialize(
                 path=path,
                 login=int(login),
                 password=password,
                 server=server,
+                timeout=timeout_ms,
             )
         )
+
+    def last_error(self):
+        return self._mt5.last_error()
 
     def shutdown(self):
         self._mt5.shutdown()

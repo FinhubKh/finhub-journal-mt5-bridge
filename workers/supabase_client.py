@@ -54,6 +54,20 @@ def trades_to_rows(trades: list, user_id: str, matched_account: dict, source: st
     return rows
 
 
+def fetch_investor_credentials(
+    client: httpx.Client, *, supabase_url: str, service_key: str, trading_account_id: str
+) -> dict | None:
+    url = (
+        f"{supabase_url.rstrip('/')}/rest/v1/investor_credentials"
+        f"?select=last_synced_at"
+        f"&trading_account_id=eq.{trading_account_id}&limit=1"
+    )
+    res = client.get(url, headers=supabase_headers(service_key), timeout=30.0)
+    res.raise_for_status()
+    rows = res.json()
+    return rows[0] if rows else None
+
+
 def fetch_trading_account(
     client: httpx.Client, *, supabase_url: str, service_key: str, trading_account_id: str
 ) -> dict | None:
