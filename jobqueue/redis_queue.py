@@ -59,7 +59,12 @@ def enqueue_job(redis_client, queue_key: str, job: dict) -> str:
             "trading_account_id": account_id,
             "job_type": payload["job_type"],
         }
-        redis_client.rpush(queue_key, json.dumps(marker))
+        raw_marker = json.dumps(marker)
+        # Login checks jump the queue so Connect doesn't wait behind a full sync.
+        if payload["job_type"] == "verify":
+            redis_client.lpush(queue_key, raw_marker)
+        else:
+            redis_client.rpush(queue_key, raw_marker)
     return payload["job_id"]
 
 

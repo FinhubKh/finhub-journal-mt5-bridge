@@ -20,6 +20,10 @@ class FakeRedis:
         self.lists.setdefault(key, []).append(value)
         return len(self.lists[key])
 
+    def lpush(self, key, value):
+        self.lists.setdefault(key, []).insert(0, value)
+        return len(self.lists[key])
+
     def llen(self, key):
         return len(self.lists.get(key) or [])
 

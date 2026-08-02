@@ -32,6 +32,7 @@ def main() -> None:
             job_type = str(job.get("job_type") or "sync")
             try:
                 if job_type == "verify":
+                    # Don't leave Connect spinning for up to 2 minutes if MT5 is busy.
                     result = run_verify_job(
                         job=job,
                         mt5=mt5,
@@ -40,8 +41,14 @@ def main() -> None:
                         queue_key=settings.redis_queue_key,
                         lock_key=settings.mt5_lock_key,
                         lock_ttl_seconds=settings.mt5_lock_ttl_seconds,
-                        lock_wait_seconds=settings.mt5_lock_wait_seconds,
+                        lock_wait_seconds=min(20, settings.mt5_lock_wait_seconds),
                     )
+                    if result.get("ok"):
+                        # Queue trade pull after login works — don't make Connect wait on it.
+                        sync_job = dict(job)
+                        sync_job.pop("job_id", None)
+                        sync_job["job_type"] = "sync"
+                        enqueue_job(client, settings.redis_queue_key, sync_job)
                 else:
                     result = run_sync_job(
                         job=job,

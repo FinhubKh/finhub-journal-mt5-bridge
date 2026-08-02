@@ -13,6 +13,10 @@ class FakeRedis:
         self.lists.setdefault(key, []).append(value)
         return len(self.lists[key])
 
+    def lpush(self, key, value):
+        self.lists.setdefault(key, []).insert(0, value)
+        return len(self.lists[key])
+
     def blpop(self, key, timeout=0):
         items = self.lists.get(key) or []
         if not items:
@@ -146,8 +150,9 @@ def test_verify_and_sync_same_account_both_queued():
         },
     )
     assert len(r.lists["q"]) == 2
-    types = {claim_job(r, "q")["job_type"], claim_job(r, "q")["job_type"]}
-    assert types == {"sync", "verify"}
+    # Verify is lpush'd so it is claimed before the already-queued sync.
+    assert claim_job(r, "q")["job_type"] == "verify"
+    assert claim_job(r, "q")["job_type"] == "sync"
 
 
 def test_job_result_roundtrip():
