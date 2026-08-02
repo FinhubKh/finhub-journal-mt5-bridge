@@ -1,3 +1,4 @@
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -5,11 +6,18 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     bridge_service_token: str = ""
-    journal_bridge_sync_url: str = ""
+    supabase_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("SUPABASE_URL", "VITE_SUPABASE_URL"),
+    )
+    supabase_service_role_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("SUPABASE_SERVICE_ROLE_KEY"),
+    )
     redis_url: str = "redis://127.0.0.1:6379/0"
     redis_queue_key: str = "finhubkh:mt5:sync_jobs"
     mt5_terminal_path: str = ""
-    # Default 2: one worker can post to journal while another holds the MT5 lock
+    # Default 2: one worker can write DB while another holds the MT5 lock
     worker_pool_size: int = 2
     history_lookback_days: int = 90
     bridge_api_host: str = "0.0.0.0"
@@ -20,4 +28,7 @@ class Settings(BaseSettings):
 
 
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    if settings.supabase_url:
+        object.__setattr__(settings, "supabase_url", settings.supabase_url.rstrip("/"))
+    return settings

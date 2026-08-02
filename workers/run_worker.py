@@ -18,6 +18,9 @@ def main() -> None:
     from workers.supervisor import mark_requeue, should_requeue
 
     settings = get_settings()
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        raise SystemExit("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env")
+
     client = make_redis(settings.redis_url)
     mt5 = MetaTrader5Adapter()
 
@@ -31,8 +34,8 @@ def main() -> None:
                     job=job,
                     mt5=mt5,
                     http=http,
-                    journal_url=settings.journal_bridge_sync_url,
-                    token=settings.bridge_service_token,
+                    supabase_url=settings.supabase_url,
+                    service_key=settings.supabase_service_role_key,
                     terminal_path=settings.mt5_terminal_path,
                     lookback_days=settings.history_lookback_days,
                     redis_client=client,

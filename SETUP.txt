@@ -22,10 +22,13 @@ Prerequisites (Windows Server VPS)
 Configuration
   Copy .env.example to .env and fill in:
     BRIDGE_SERVICE_TOKEN - shared secret with finhubkh_journal (openssl rand -hex 32)
-    JOURNAL_BRIDGE_SYNC_URL - journal API URL for posting sync results
+    SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY - bridge upserts trades directly into DB
     REDIS_URL - use redis://127.0.0.1:6379/0 for the HOST worker
     MT5_TERMINAL_PATH - full path to terminal64.exe (doubled backslashes in .env)
     WORKER_POOL_SIZE, HISTORY_LOOKBACK_DAYS, etc.
+
+  Data flow: journal queues a job -> worker reads MT5 -> worker writes trades to
+  Supabase. The web app only fetches from the database (no journal HTTP callback).
 
   docker-compose.yml overrides REDIS_URL to redis://redis:6379/0 inside the API
   container only. Leave host .env on 127.0.0.1 so the Windows worker can connect.
@@ -62,7 +65,7 @@ Windows host worker (MT5)
 Performance notes
   - Duplicate sync requests for the same trading_account_id are coalesced while pending.
   - A Redis lock (MT5_LOCK_KEY) ensures only one worker drives MetaTrader at a time.
-  - WORKER_POOL_SIZE=2 lets one worker post to the journal while another uses MT5.
+  - WORKER_POOL_SIZE=2 lets one worker write to Supabase while another uses MT5.
   - Redis is tuned for a queue workload (AOF everysec, no RDB snapshots, noeviction).
 
 Delivery semantics (v1)

@@ -44,16 +44,43 @@ class FakeLockRedis:
         return 1
 
 
-def test_worker_posts_trades_on_success():
+def _supabase_transport(on_trades=None):
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/trading_accounts"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "a1",
+                        "user_id": "u1",
+                        "name": "Live",
+                        "pnl_denomination": "usd",
+                    }
+                ],
+            )
+        if path.endswith("/trades"):
+            if on_trades:
+                on_trades(request)
+            import json
+
+            return httpx.Response(201, json=json.loads(request.content.decode()))
+        if path.endswith("/investor_credentials"):
+            return httpx.Response(204)
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+def test_worker_upserts_trades_on_success():
     seen = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def on_trades(request: httpx.Request):
         import json
 
         seen["payload"] = json.loads(request.content.decode())
-        return httpx.Response(200, json={"ok": True})
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = httpx.Client(transport=_supabase_transport(on_trades))
     mt5 = FakeMt5(
         deals=[
             {
@@ -90,40 +117,43 @@ def test_worker_posts_trades_on_success():
         job={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
         mt5=mt5,
         http=client,
-        journal_url="http://journal/v1/bridge/sync",
-        token="tok",
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
         terminal_path="C:/mt5/terminal64.exe",
         lookback_days=90,
         redis_client=FakeLockRedis(),
         lock_wait_seconds=1,
     )
     assert result["ok"] is True
-    assert len(seen["payload"]["trades"]) == 1
+    assert len(seen["payload"]) == 1
+    assert seen["payload"][0]["source"] == "investor_bridge"
 
 
-def test_worker_posts_error_on_login_fail():
+def test_worker_records_error_on_login_fail():
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         import json
 
-        seen["payload"] = json.loads(request.content.decode())
-        return httpx.Response(200, json={"acknowledged": True})
+        if request.url.path.endswith("/investor_credentials"):
+            seen["payload"] = json.loads(request.content.decode())
+            return httpx.Response(204)
+        return httpx.Response(404)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     result = run_sync_job(
         job={"trading_account_id": "a1", "login": "1", "password": "bad", "server": "S"},
         mt5=FakeMt5(fail_login=True),
         http=client,
-        journal_url="http://journal/v1/bridge/sync",
-        token="tok",
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
         terminal_path="C:/mt5/terminal64.exe",
         lookback_days=90,
         redis_client=FakeLockRedis(),
         lock_wait_seconds=1,
     )
     assert result["ok"] is False
-    assert "credentials" in seen["payload"]["error"].lower() or "login" in seen["payload"]["error"].lower()
+    assert "credentials" in seen["payload"]["last_sync_error"].lower()
 
 
 def test_worker_lock_timeout_without_mt5():
@@ -132,8 +162,8 @@ def test_worker_lock_timeout_without_mt5():
         job={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
         mt5=FakeMt5(),
         http=client,
-        journal_url="http://journal/v1/bridge/sync",
-        token="tok",
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
         terminal_path="C:/mt5/terminal64.exe",
         lookback_days=90,
         redis_client=FakeLockRedis(hold=True),
