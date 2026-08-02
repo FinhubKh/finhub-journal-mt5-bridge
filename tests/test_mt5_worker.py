@@ -1,4 +1,6 @@
 import httpx
+
+from jobqueue.redis_lock import RedisLock
 from workers.mt5_worker import run_sync_job
 
 
@@ -19,6 +21,27 @@ class FakeMt5:
 
     def history_deals(self, date_from, date_to):
         return list(self.deals)
+
+
+class FakeLockRedis:
+    def __init__(self, hold=False):
+        self.kv = {}
+        self.hold = hold
+
+    def set(self, key, value, nx=False, ex=None):
+        if self.hold:
+            return False
+        if nx and key in self.kv:
+            return False
+        self.kv[key] = value
+        return True
+
+    def get(self, key):
+        return self.kv.get(key)
+
+    def delete(self, key):
+        self.kv.pop(key, None)
+        return 1
 
 
 def test_worker_posts_trades_on_success():
@@ -71,6 +94,8 @@ def test_worker_posts_trades_on_success():
         token="tok",
         terminal_path="C:/mt5/terminal64.exe",
         lookback_days=90,
+        redis_client=FakeLockRedis(),
+        lock_wait_seconds=1,
     )
     assert result["ok"] is True
     assert len(seen["payload"]["trades"]) == 1
@@ -94,6 +119,34 @@ def test_worker_posts_error_on_login_fail():
         token="tok",
         terminal_path="C:/mt5/terminal64.exe",
         lookback_days=90,
+        redis_client=FakeLockRedis(),
+        lock_wait_seconds=1,
     )
     assert result["ok"] is False
     assert "credentials" in seen["payload"]["error"].lower() or "login" in seen["payload"]["error"].lower()
+
+
+def test_worker_lock_timeout_without_mt5():
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    result = run_sync_job(
+        job={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
+        mt5=FakeMt5(),
+        http=client,
+        journal_url="http://journal/v1/bridge/sync",
+        token="tok",
+        terminal_path="C:/mt5/terminal64.exe",
+        lookback_days=90,
+        redis_client=FakeLockRedis(hold=True),
+        lock_wait_seconds=0,
+        lock_ttl_seconds=1,
+    )
+    assert result == {"ok": False, "error": "mt5_lock_timeout"}
+
+
+def test_redis_lock_roundtrip():
+    r = FakeLockRedis()
+    lock = RedisLock(r, "k", ttl_seconds=10, wait_seconds=1, poll_seconds=0.01)
+    assert lock.acquire() is True
+    assert r.get("k") == lock.token
+    lock.release()
+    assert r.get("k") is None

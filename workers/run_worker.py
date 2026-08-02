@@ -1,9 +1,16 @@
 import httpx
-import redis
 
 from app.config import get_settings
+from jobqueue.redis_client import make_redis
 from jobqueue.redis_queue import claim_job, enqueue_job
 from workers.mt5_worker import run_sync_job
+
+
+def _http_client() -> httpx.Client:
+    return httpx.Client(
+        timeout=httpx.Timeout(60.0, connect=10.0),
+        limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+    )
 
 
 def main() -> None:
@@ -11,16 +18,16 @@ def main() -> None:
     from workers.supervisor import mark_requeue, should_requeue
 
     settings = get_settings()
-    client = redis.from_url(settings.redis_url)
+    client = make_redis(settings.redis_url)
     mt5 = MetaTrader5Adapter()
 
-    with httpx.Client() as http:
+    with _http_client() as http:
         while True:
             job = claim_job(client, settings.redis_queue_key, timeout=5)
             if not job:
                 continue
             try:
-                run_sync_job(
+                result = run_sync_job(
                     job=job,
                     mt5=mt5,
                     http=http,
@@ -28,7 +35,14 @@ def main() -> None:
                     token=settings.bridge_service_token,
                     terminal_path=settings.mt5_terminal_path,
                     lookback_days=settings.history_lookback_days,
+                    redis_client=client,
+                    lock_key=settings.mt5_lock_key,
+                    lock_ttl_seconds=settings.mt5_lock_ttl_seconds,
+                    lock_wait_seconds=settings.mt5_lock_wait_seconds,
                 )
+                if result.get("error") == "mt5_lock_timeout":
+                    # Do not burn the retry budget — another worker was using MT5
+                    enqueue_job(client, settings.redis_queue_key, job)
             except Exception:
                 if should_requeue(job):
                     enqueue_job(client, settings.redis_queue_key, mark_requeue(job))

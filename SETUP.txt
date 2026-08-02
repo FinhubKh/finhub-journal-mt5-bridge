@@ -1,48 +1,86 @@
-FinHubKh MT5 Bridge - Windows VPS setup
+FinHubKh MT5 Bridge - setup
 
-Prerequisites
-  - Windows Server or VPS with admin access
-  - Python 3.11 (add to PATH)
-  - Redis for Windows (Memurai, Redis Stack MSI, or WSL Redis bound to 127.0.0.1 only)
-  - Portable or installed MetaTrader 5 terminal (note path to terminal64.exe)
+Architecture (hybrid Docker)
+  Docker Compose runs:
+    - Redis (queue)
+    - Bridge API (accepts sync jobs from the journal on port 8788)
+  Windows host runs (must be beside MetaTrader 5):
+    - Python worker pool: python -m workers.supervisor
+    - MetaTrader 5 terminal
 
-Redis
-  Install and run Redis locally on the VPS. Redis must stay on the same host as the bridge
-  (127.0.0.1). Do not expose Redis to the public internet.
-  Job queue payloads may contain investor passwords briefly while workers process sync jobs.
-  Bind Redis to 127.0.0.1 and restrict firewall access to trusted hosts only.
+  Why hybrid: MetaTrader5 is a Windows GUI app and is unreliable inside Server Core
+  containers. Redis + API are Linux containers and work on Docker Desktop / Linux
+  container engines.
 
-Delivery semantics (v1)
-  Sync jobs are at-most-once if a worker hard-crashes mid-job (the job is already removed
-  from the queue and is not recovered). Transient worker exceptions may requeue once
-  (attempt counter on the job payload). Successful or handled failures (bad credentials,
-  empty history) are not retried automatically.
+Prerequisites (Windows Server VPS)
+  - Docker Engine with Linux containers (Docker Desktop, or engine that can pull
+    redis:7-alpine and build python:3.11-slim images)
+  - Python 3.11 on the Windows host (for the worker)
+  - Portable or installed MetaTrader 5 (note path to terminal64.exe)
+  - Open firewall only for 8788 from trusted journal callers; keep Redis on 127.0.0.1
 
-MetaTrader 5
-  Install MT5 and log in once if the terminal requires it. Set MT5_TERMINAL_PATH in .env
-  to the full path of terminal64.exe (use doubled backslashes in .env).
+Configuration
+  Copy .env.example to .env and fill in:
+    BRIDGE_SERVICE_TOKEN - shared secret with finhubkh_journal (openssl rand -hex 32)
+    JOURNAL_BRIDGE_SYNC_URL - journal API URL for posting sync results
+    REDIS_URL - use redis://127.0.0.1:6379/0 for the HOST worker
+    MT5_TERMINAL_PATH - full path to terminal64.exe (doubled backslashes in .env)
+    WORKER_POOL_SIZE, HISTORY_LOOKBACK_DAYS, etc.
 
-Python dependencies
+  docker-compose.yml overrides REDIS_URL to redis://redis:6379/0 inside the API
+  container only. Leave host .env on 127.0.0.1 so the Windows worker can connect.
+
+Docker: Redis + API
   cd finhubkh-mt5-bridge
+  docker compose up -d --build
+
+  Check:
+    docker compose ps
+    curl http://127.0.0.1:8788/health
+    docker compose logs -f api
+
+  Stop:
+    docker compose down
+
+  Data: Redis AOF is stored in the redis_data named volume.
+
+Windows host worker (MT5)
+  Install MT5 and log in once if the terminal requires it.
+  Set MT5_TERMINAL_PATH in .env.
+
   python -m venv .venv
   .venv\Scripts\activate
   pip install -r requirements.txt
   pip install MetaTrader5==5.0.45
 
-Configuration
-  Copy .env.example to .env and fill in values:
-    BRIDGE_SERVICE_TOKEN - shared secret with finhubkh_journal (openssl rand -hex 32)
-    JOURNAL_BRIDGE_SYNC_URL - journal API URL for posting sync results
-    REDIS_URL, MT5_TERMINAL_PATH, WORKER_POOL_SIZE, HISTORY_LOOKBACK_DAYS, etc.
+  Confirm Redis from the host:
+    (optional) redis-cli -h 127.0.0.1 ping
 
-Run API (accepts sync jobs from journal)
-  .venv\Scripts\activate
-  python -m uvicorn app.main:app --host 0.0.0.0 --port 8788
-  On Windows you may instead use BRIDGE_API_HOST and BRIDGE_API_PORT from .env.
+  Start the worker pool (keep this process running):
+    python -m workers.supervisor
 
-Run worker pool (MT5 sync processors)
-  Open a second terminal, same venv:
-  python -m workers.supervisor
+Performance notes
+  - Duplicate sync requests for the same trading_account_id are coalesced while pending.
+  - A Redis lock (MT5_LOCK_KEY) ensures only one worker drives MetaTrader at a time.
+  - WORKER_POOL_SIZE=2 lets one worker post to the journal while another uses MT5.
+  - Redis is tuned for a queue workload (AOF everysec, no RDB snapshots, noeviction).
 
-Keep Redis, the API process, and the worker supervisor running under your process manager
-or Windows Service wrapper of choice.
+Delivery semantics (v1)
+  Sync jobs are at-most-once if a worker hard-crashes mid-job (the job is already removed
+  from the queue and is not recovered). Transient worker exceptions may requeue once
+  (attempt counter on the job payload). Successful or handled failures (bad credentials,
+  empty history) are not retried automatically. Lock-wait timeouts requeue without
+  burning that retry budget.
+
+Security notes
+  - Redis is published only on 127.0.0.1:6379. Do not change that to 0.0.0.0.
+  - Job queue payloads may contain investor passwords briefly while workers process jobs.
+  - BRIDGE_SERVICE_TOKEN must match the journal; never commit .env.
+  - Prefer binding/exposing API 8788 only to your journal network / VPN / firewall allowlist.
+
+Non-Docker fallback (API on host)
+  If you cannot run Docker Linux containers on the VPS:
+    Install Redis for Windows / Memurai bound to 127.0.0.1
+    .venv\Scripts\activate
+    python -m uvicorn app.main:app --host 0.0.0.0 --port 8788
+    python -m workers.supervisor
