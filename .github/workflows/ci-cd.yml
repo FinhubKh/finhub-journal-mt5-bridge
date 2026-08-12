@@ -1,0 +1,105 @@
+name: CI + Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: mt5-bridge-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run pytest
+        run: pytest -q
+
+  deploy:
+    name: Deploy to Windows VM
+    needs: test
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pack deploy payload
+        run: |
+          mkdir -p /tmp/bridge-payload
+          rsync -a \
+            --exclude '.git' \
+            --exclude '.venv' \
+            --exclude 'venv' \
+            --exclude '.env' \
+            --exclude 'logs' \
+            --exclude '__pycache__' \
+            --exclude '.pytest_cache' \
+            --exclude '.mypy_cache' \
+            --exclude 'options.png' \
+            ./ /tmp/bridge-payload/
+          tar -C /tmp/bridge-payload -czf /tmp/bridge-deploy.tgz .
+
+      - name: Configure SSH
+        env:
+          BRIDGE_SSH_KEY: ${{ secrets.BRIDGE_SSH_KEY }}
+          BRIDGE_SSH_HOST: ${{ secrets.BRIDGE_SSH_HOST }}
+          BRIDGE_SSH_USER: ${{ secrets.BRIDGE_SSH_USER }}
+          BRIDGE_SSH_PORT: ${{ secrets.BRIDGE_SSH_PORT }}
+        run: |
+          test -n "$BRIDGE_SSH_KEY"
+          test -n "$BRIDGE_SSH_HOST"
+          test -n "$BRIDGE_SSH_USER"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$BRIDGE_SSH_KEY" > ~/.ssh/bridge_deploy
+          chmod 600 ~/.ssh/bridge_deploy
+          PORT="${BRIDGE_SSH_PORT:-22}"
+          ssh-keyscan -p "$PORT" -H "$BRIDGE_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          cat > ~/.ssh/config <<EOF
+          Host bridge
+            HostName ${BRIDGE_SSH_HOST}
+            User ${BRIDGE_SSH_USER}
+            Port ${PORT}
+            IdentityFile ~/.ssh/bridge_deploy
+            StrictHostKeyChecking accept-new
+          EOF
+
+      - name: Upload and deploy
+        run: |
+          ssh bridge 'powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path C:\\finhubkh\\deploy-staging | Out-Null; if (Test-Path C:\\finhubkh\\bridge-deploy.tgz) { Remove-Item C:\\finhubkh\\bridge-deploy.tgz -Force }"'
+          scp /tmp/bridge-deploy.tgz bridge:C:/finhubkh/bridge-deploy.tgz
+          scp scripts/deploy-remote.ps1 bridge:C:/finhubkh/deploy-remote.ps1
+          ssh bridge 'powershell -NoProfile -ExecutionPolicy Bypass -Command "
+            \$ErrorActionPreference = \"Stop\"
+            \$staging = \"C:\\finhubkh\\deploy-staging\"
+            if (Test-Path \$staging) { Remove-Item \$staging -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path \$staging | Out-Null
+            tar -xf C:\\finhubkh\\bridge-deploy.tgz -C \$staging
+            & powershell -NoProfile -ExecutionPolicy Bypass -File C:\\finhubkh\\deploy-remote.ps1
+          "'
+
+      - name: Public health check
+        run: |
+          for i in 1 2 3 4 5 6; do
+            body=$(curl -fsS --max-time 10 https://bridge.finhubkh.com/health || true)
+            echo "try=$i $body"
+            echo "$body" | grep -q '"ok": *true' && exit 0
+            sleep 5
+          done
+          echo "Health check failed"
+          exit 1

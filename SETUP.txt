@@ -86,6 +86,16 @@ GCP Windows VM (Finhubkh project)
   Health: curl http://127.0.0.1:8788/health
   Journal: set MT5_BRIDGE_URL=https://bridge.finhubkh.com (Vercel + local .env)
 
+CI/CD (GitHub Actions)
+  Repo: FinhubKh/finhub-journal-mt5-bridge
+  On push to main (and workflow_dispatch):
+    1) pytest on Ubuntu
+    2) rsync/tar app code to the Windows VM (never overwrites .env / .venv)
+    3) pip refresh + restart API + workers.supervisor (MT5 terminal stays running)
+  Secrets required: BRIDGE_SSH_HOST, BRIDGE_SSH_USER, BRIDGE_SSH_KEY
+  Optional: BRIDGE_SSH_PORT (default 22)
+  Manual deploy: Actions → “CI + Deploy” → Run workflow
+
 New broker servers (one-time ops step per broker — NOT per user)
   MT5's automated initialize() only connects instantly to servers the terminal
   already has cached (bundled defaults, or anything logged into via the GUI
