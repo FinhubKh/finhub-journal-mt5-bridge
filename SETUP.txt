@@ -63,7 +63,30 @@ Windows host worker (MT5)
   Start the worker pool (keep this process running):
     python -m workers.supervisor
 
-New broker servers (one-time step per broker)
+GCP Windows VM (Finhubkh project)
+  VM name: finhubkh-mt5-bridge
+  Zone:    asia-southeast1-b
+  Static IP: 35.197.132.210 (finhubkh-mt5-bridge-ip)
+  Domain:  https://bridge.finhubkh.com  (Cloudflare proxied A → static IP, SSL Flexible → :80)
+  Direct:  http://35.197.132.210:8788  (token-authed; firewall tag finhubkh-mt5-bridge)
+  RDP:     TCP 3389 (allowlisted to admin IP via finhubkh-mt5-bridge-rdp)
+
+  Cloudflare DNS (zone finhubkh.com):
+    Type A | Name bridge | Content 35.197.132.210 | Proxy ON (orange cloud)
+    SSL/TLS mode for this host: Flexible (or Full if you terminate TLS on the VM)
+
+  On the VM (elevated PowerShell), after copying this folder + .env to
+  C:\finhubkh-mt5-bridge:
+    Set-ExecutionPolicy Bypass -Scope Process -Force
+    .\scripts\bootstrap-windows.ps1
+    # Install MetaTrader 5, start Docker Desktop (Linux containers), reboot if asked
+    .\scripts\start-bridge.ps1
+    .\scripts\register-worker-task.ps1
+
+  Health: curl http://127.0.0.1:8788/health
+  Journal: set MT5_BRIDGE_URL=https://bridge.finhubkh.com (Vercel + local .env)
+
+New broker servers (one-time ops step per broker — NOT per user)
   MT5's automated initialize() only connects instantly to servers the terminal
   already has cached (bundled defaults, or anything logged into via the GUI
   before). A server it has never seen just hangs to MT5_INIT_TIMEOUT_MS and
@@ -71,18 +94,28 @@ New broker servers (one-time step per broker)
   wrong or simply not yet cached, and happens even for a correctly-spelled
   real broker server.
 
-  The first time an investor connects a broker this bridge hasn't synced
-  before, do this once on the Windows host:
+  End users only enter login + investor password + server name in the app.
+  You pre-cache brokers once on the Windows VM so most users never hit IPC timeout.
+
+  Recommended pre-cache list (log into each once via MT5 GUI on the VPS):
+    - ST Markets (STMarket-Live, STMarket-Demo) — Cambodia priority
+    - Lirunex (LirunexLimited-Live, LirunexLimited-Live-MT5, LirunexLimited-Demo)
+    - Exness (e.g. Exness-MT5Real, Exness-MT5Real36, Exness-MT5Trial — pick exact strings MT5 search shows)
+    - XM (XMGlobal-MT5 / XM-MT5)
+    - IC Markets (ICMarketsSC-MT5 / ICMarketsSC-Demo)
+    - Pepperstone (Pepperstone-MT5-Live / Demo)
+    - Any other SEA brokers your users actually use (add as they appear)
+
+  Procedure on the Windows host:
     1. Open the MT5 terminal (it runs hidden — un-hide it, or launch a fresh
        instance from MT5_TERMINAL_PATH).
     2. File -> Login to Trade Account -> type the broker name in the Server
        field and use MT5's live search to find the exact server string.
-    3. Log in with any valid account on that server (their real credentials
-       work fine).
+    3. Log in with any valid account on that server (demo or real credentials).
   After that one manual login, the server is cached and every future
   automated sync/verify job for that broker connects in well under a second
   — no code change needed, and it doesn't need repeating for other accounts
-  on the same broker/server.
+  on the same broker/server. Obscure new brokers still need this ops step once.
 
 Performance notes
   - Duplicate sync requests for the same trading_account_id are coalesced while pending.

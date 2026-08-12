@@ -8,15 +8,19 @@ class MetaTrader5Adapter:
         self._mt5 = mt5
 
     def initialize(self, path, login, password, server, timeout_ms=15000) -> bool:
-        return bool(
-            self._mt5.initialize(
-                path=path,
-                login=int(login),
-                password=password,
-                server=server,
-                timeout=timeout_ms,
-            )
-        )
+        # Forward slashes + portable mode avoid common IPC timeouts on Windows
+        # Server / Hyper-V VPS installs under Program Files.
+        normalized = (path or "").replace("\\", "/")
+        kwargs = {
+            "login": int(login),
+            "password": password,
+            "server": server,
+            "timeout": timeout_ms,
+            "portable": True,
+        }
+        if normalized:
+            kwargs["path"] = normalized
+        return bool(self._mt5.initialize(**kwargs))
 
     def last_error(self):
         return self._mt5.last_error()

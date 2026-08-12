@@ -47,7 +47,10 @@ services:
       BRIDGE_API_HOST: 0.0.0.0
       BRIDGE_API_PORT: "8788"
     ports:
+      # Direct access / health checks
       - "8788:8788"
+      # Cloudflare orange-cloud proxies HTTPS → origin :80 (Flexible SSL)
+      - "80:8788"
     healthcheck:
       test:
         [
