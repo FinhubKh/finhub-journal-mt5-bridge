@@ -166,6 +166,19 @@ def run_verify_job(
             lock.release()
 
 
+def _sync_result(job, *, ok: bool, error: str | None = None, count: int | None = None) -> dict:
+    payload = {
+        "status": "done",
+        "ok": ok,
+        "trading_account_id": job["trading_account_id"],
+    }
+    if error:
+        payload["error"] = error
+    if count is not None:
+        payload["count"] = count
+    return payload
+
+
 def run_sync_job(
     *,
     job,
@@ -176,16 +189,27 @@ def run_sync_job(
     terminal_path: str,
     lookback_days: int,
     redis_client=None,
+    queue_key: str = "finhubkh:mt5:sync_jobs",
     lock_key: str = "finhubkh:mt5:terminal_lock",
     lock_ttl_seconds: int = 300,
     lock_wait_seconds: int = 120,
     init_timeout_ms: int = 15000,
 ) -> dict:
     trading_account_id = job["trading_account_id"]
+    job_id = job.get("job_id")
     lock = None
     deals = None
     login_ok = False
     sync_kind = "unknown"
+
+    def _store(result: dict) -> dict:
+        if redis_client is not None and job_id:
+            try:
+                set_job_result(redis_client, queue_key, job_id, result)
+            except Exception:
+                pass
+        return result
+
     try:
         if redis_client is not None:
             lock = RedisLock(
@@ -195,7 +219,7 @@ def run_sync_job(
                 wait_seconds=lock_wait_seconds,
             )
             if not lock.acquire():
-                return {"ok": False, "error": "mt5_lock_timeout"}
+                return _store(_sync_result(job, ok=False, error="mt5_lock_timeout"))
 
         # Hold the lock only for MT5 terminal I/O so another worker can write to DB
         # while this process completes HTTP upserts.
@@ -237,7 +261,7 @@ def run_sync_job(
                 trading_account_id=trading_account_id,
                 error=msg,
             )
-            return {"ok": False, "error": msg}
+            return _store(_sync_result(job, ok=False, error=msg))
 
         trades = deals_to_trades(deals or [])
         if not trades:
@@ -252,7 +276,7 @@ def run_sync_job(
                 trading_account_id=trading_account_id,
                 error=msg,
             )
-            return {"ok": False, "error": error_code}
+            return _store(_sync_result(job, ok=False, error=error_code))
 
         saved = upsert_trades(
             http,
@@ -261,7 +285,8 @@ def run_sync_job(
             trading_account_id=trading_account_id,
             trades=trades,
         )
-        return {"ok": True, "count": saved.get("inserted", len(trades))}
+        count = saved.get("inserted", len(trades))
+        return _store(_sync_result(job, ok=True, count=count))
     except Exception as exc:
         msg = f"Broker server didn't respond, try again ({type(exc).__name__})"
         try:
@@ -274,7 +299,7 @@ def run_sync_job(
             )
         except Exception:
             pass
-        return {"ok": False, "error": msg}
+        return _store(_sync_result(job, ok=False, error=msg))
     finally:
         if lock is not None:
             lock.release()

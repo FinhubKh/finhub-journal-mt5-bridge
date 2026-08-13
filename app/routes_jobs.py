@@ -79,6 +79,12 @@ def create_sync_job(
         settings.redis_queue_key,
         payload,
     )
+    set_job_result(
+        request.app.state.redis,
+        settings.redis_queue_key,
+        job_id,
+        {"status": "pending", "trading_account_id": payload["trading_account_id"]},
+    )
     return {"job_id": job_id}
 
 

@@ -201,7 +201,9 @@ def test_worker_reports_never_traded_on_first_sync_with_no_deals():
         redis_client=FakeLockRedis(),
         lock_wait_seconds=1,
     )
-    assert result == {"ok": False, "error": "no_trades"}
+    assert result["ok"] is False
+    assert result["error"] == "no_trades"
+    assert result["status"] == "done"
 
 
 def test_worker_reports_no_new_trades_on_incremental_sync_with_no_deals():
@@ -224,7 +226,9 @@ def test_worker_reports_no_new_trades_on_incremental_sync_with_no_deals():
         redis_client=FakeLockRedis(),
         lock_wait_seconds=1,
     )
-    assert result == {"ok": False, "error": "no_new_trades"}
+    assert result["ok"] is False
+    assert result["error"] == "no_new_trades"
+    assert result["status"] == "done"
 
 
 def test_worker_falls_back_to_generic_no_trades_message_when_lookup_fails():
@@ -247,7 +251,9 @@ def test_worker_falls_back_to_generic_no_trades_message_when_lookup_fails():
     )
     # Credentials lookup blew up (500) -> can't tell first vs incremental, but
     # the sync itself still completes and reports the generic no-trades result.
-    assert result == {"ok": False, "error": "no_trades"}
+    assert result["ok"] is False
+    assert result["error"] == "no_trades"
+    assert result["status"] == "done"
 
 
 def test_worker_records_error_on_login_fail():
@@ -321,7 +327,9 @@ def test_worker_lock_timeout_without_mt5():
         lock_wait_seconds=0,
         lock_ttl_seconds=1,
     )
-    assert result == {"ok": False, "error": "mt5_lock_timeout"}
+    assert result["ok"] is False
+    assert result["error"] == "mt5_lock_timeout"
+    assert result["status"] == "done"
 
 
 def test_redis_lock_roundtrip():

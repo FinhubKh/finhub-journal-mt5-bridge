@@ -69,6 +69,7 @@ def main() -> None:
                         terminal_path=settings.mt5_terminal_path,
                         lookback_days=settings.history_lookback_days,
                         redis_client=client,
+                        queue_key=settings.redis_queue_key,
                         lock_key=settings.mt5_lock_key,
                         lock_ttl_seconds=settings.mt5_lock_ttl_seconds,
                         lock_wait_seconds=settings.mt5_lock_wait_seconds,
