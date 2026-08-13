@@ -116,16 +116,21 @@ New broker servers (one-time ops step per broker — NOT per user)
     - Pepperstone (Pepperstone-MT5-Live / Demo)
     - Any other SEA brokers your users actually use (add as they appear)
 
-  Procedure on the Windows host:
-    1. Open the MT5 terminal (it runs hidden — un-hide it, or launch a fresh
-       instance from MT5_TERMINAL_PATH).
+  Automated cache (preferred for brokers with a MetaQuotes CDN installer):
+    cd C:\finhubkh\finhubkh-mt5-bridge
+    .\scripts\cache-brokers.ps1
+    .\scripts\cache-brokers.ps1 -ProbeOnly
+  This downloads branded MT5 builds into C:\finhubkh\mt5-brokers\<id>, writes
+  config\mt5_terminal_map.json, and the worker routes each job's server name
+  to the matching terminal (see workers\terminal_map.py).
+
+  Manual cache (still required when no CDN installer exists, e.g. ST Markets /
+  IC Markets / FxPro / Fusion / LiteFinance — or a brand-new server string):
+    1. Open the MT5 terminal (portable or the branded folder for that broker).
     2. File -> Login to Trade Account -> type the broker name in the Server
        field and use MT5's live search to find the exact server string.
-    3. Log in with any valid account on that server (demo or real credentials).
-  After that one manual login, the server is cached and every future
-  automated sync/verify job for that broker connects in well under a second
-  — no code change needed, and it doesn't need repeating for other accounts
-  on the same broker/server. Obscure new brokers still need this ops step once.
+    3. Log in once with any valid account (demo or investor).
+  After that one login, future automated sync/verify for that server is fast.
 
 Performance notes
   - Duplicate sync requests for the same trading_account_id are coalesced while pending.

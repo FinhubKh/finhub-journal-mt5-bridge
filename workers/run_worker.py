@@ -7,6 +7,7 @@ from jobqueue.redis_client import make_redis
 from jobqueue.redis_queue import claim_job, enqueue_job
 from workers.logging_setup import get_logger
 from workers.mt5_worker import run_sync_job, run_verify_job
+from workers.terminal_map import resolve_terminal_path
 
 
 def _http_client() -> httpx.Client:
@@ -38,7 +39,19 @@ def main() -> None:
                 continue
             job_type = str(job.get("job_type") or "sync")
             account_id = job.get("trading_account_id")
-            log.info("Claimed %s job account=%s job_id=%s", job_type, account_id, job.get("job_id"))
+            terminal_path = resolve_terminal_path(
+                str(job.get("server") or ""),
+                default_path=settings.mt5_terminal_path,
+                map_path=settings.mt5_terminal_map_path or None,
+            )
+            log.info(
+                "Claimed %s job account=%s job_id=%s server=%s terminal=%s",
+                job_type,
+                account_id,
+                job.get("job_id"),
+                job.get("server"),
+                terminal_path,
+            )
             try:
                 if job_type == "verify":
                     # Don't leave Connect spinning for up to 2 minutes if MT5 is busy.
@@ -46,7 +59,7 @@ def main() -> None:
                         job=job,
                         mt5=mt5,
                         redis_client=client,
-                        terminal_path=settings.mt5_terminal_path,
+                        terminal_path=terminal_path,
                         queue_key=settings.redis_queue_key,
                         lock_key=settings.mt5_lock_key,
                         lock_ttl_seconds=settings.mt5_lock_ttl_seconds,
@@ -66,7 +79,7 @@ def main() -> None:
                         http=http,
                         supabase_url=settings.supabase_url,
                         service_key=settings.supabase_service_role_key,
-                        terminal_path=settings.mt5_terminal_path,
+                        terminal_path=terminal_path,
                         lookback_days=settings.history_lookback_days,
                         redis_client=client,
                         queue_key=settings.redis_queue_key,

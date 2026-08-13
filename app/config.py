@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://127.0.0.1:6379/0"
     redis_queue_key: str = "finhubkh:mt5:sync_jobs"
     mt5_terminal_path: str = ""
+    # Optional JSON map (server prefix → terminal64.exe). See config/mt5_terminal_map.json.
+    mt5_terminal_map_path: str = ""
     # Bound how long a single login attempt can hold the MT5 lock. MT5's own
     # default is 60s, which lets one bad/unreachable broker starve every other
     # queued verify/sync job behind the lock.
