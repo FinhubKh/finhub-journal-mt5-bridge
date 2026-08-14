@@ -14,13 +14,12 @@ def supabase_headers(service_key: str, extra: dict | None = None) -> dict:
     return headers
 
 
-def resolve_pnl_usd(trade: dict, matched_account: dict) -> float:
+def resolve_pnl_usd(trade: dict, matched_account: dict | None = None) -> float:
+    """Store broker/MT5 amounts 1:1. Cent vs USD is a display label only."""
     raw = trade.get("pnl_raw")
     fallback = float(trade.get("pnl_usd") or 0)
-    denom = "cent" if matched_account.get("pnl_denomination") == "cent" else "usd"
     if raw is not None:
-        value = float(raw)
-        return value / 100 if denom == "cent" else value
+        return float(raw)
     return fallback
 
 

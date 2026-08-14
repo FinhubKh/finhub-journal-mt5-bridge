@@ -32,7 +32,8 @@ def test_trades_to_rows_maps_cent_pnl():
         account,
         "investor_bridge",
     )
-    assert rows[0]["pnl_usd"] == 2.5
+    # Cent accounts store MT5 raw amounts 1:1 (display uses ¢, no ÷100).
+    assert rows[0]["pnl_usd"] == 250
     assert rows[0]["result"] == "win"
     assert rows[0]["account_id"] == "a1"
     assert rows[0]["source"] == "investor_bridge"
