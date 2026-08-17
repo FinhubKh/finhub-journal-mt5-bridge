@@ -37,7 +37,6 @@ if (Test-Path $Staging) {
     $dest = Join-Path $Root $_.Name
     if ($_.PSIsContainer) {
       robocopy $_.FullName $dest /MIR /NFL /NDL /NJH /NJS /XD __pycache__ .pytest_cache logs .venv .git | Out-Null
-      # robocopy exit codes 0-7 are success-ish
       if ($LASTEXITCODE -ge 8) { throw "robocopy failed for $($_.Name) code=$LASTEXITCODE" }
       Log ("Mirrored dir {0}" -f $_.Name)
     } else {
@@ -53,24 +52,8 @@ if (Test-Path $Staging) {
 Log "pip install -r requirements.txt"
 & $Pip install -r "$Root\requirements.txt"
 if ($LASTEXITCODE -ne 0) { throw "pip install requirements failed" }
-# Windows MT5 extras (not installed in Linux CI)
 & $Pip install "MetaTrader5>=5.0.45" "numpy<2" pywin32 psutil
 if ($LASTEXITCODE -ne 0) { throw "pip install MT5 extras failed" }
-
-# 3) Restart API - prefer Docker Compose (Redis + API); fall back to host uvicorn.
-function Resolve-DockerExe {
-  $cmd = Get-Command docker -ErrorAction SilentlyContinue
-  if ($cmd) { return $cmd.Source }
-  $candidates = @(
-    "$env:ProgramFiles\Docker\Docker\resources\bin\docker.exe",
-    "$env:ProgramFiles\Docker\Docker\resources\docker.exe",
-    "$env:ProgramFiles\Docker\Docker\docker.exe"
-  )
-  foreach ($c in $candidates) {
-    if (Test-Path $c) { return $c }
-  }
-  return $null
-}
 
 function Stop-ListenersOnPort([int]$Port) {
   Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
@@ -83,61 +66,37 @@ function Stop-ListenersOnPort([int]$Port) {
     }
 }
 
-$composeFile = Join-Path $Root "docker-compose.yml"
-$dockerExe = Resolve-DockerExe
-$apiRestarted = $false
-if ((Test-Path $composeFile) -and $dockerExe) {
-  Log ("Rebuilding Docker Compose API via {0}" -f $dockerExe)
-  Push-Location $Root
-  try {
-    & $dockerExe compose up -d --build --force-recreate api
-    if ($LASTEXITCODE -ne 0) {
-      Log ("WARNING: docker compose failed code={0} - falling back to host uvicorn" -f $LASTEXITCODE)
-    } else {
-      $apiRestarted = $true
-      Start-Sleep -Seconds 5
-    }
-  } finally {
-    Pop-Location
+function Restart-NamedTask([string]$Name) {
+  $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+  if (-not $task) {
+    Log ("WARNING: scheduled task $Name missing")
+    return $false
   }
-} else {
-  Log ("Docker Compose unavailable (compose={0} docker={1})" -f (Test-Path $composeFile), [bool]$dockerExe)
+  Log "Restarting scheduled task $Name"
+  Stop-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 1
+  Start-ScheduledTask -TaskName $Name
+  return $true
 }
 
-if (-not $apiRestarted) {
-  Log "Restarting host uvicorn on :80 and :8788"
-  if ($dockerExe -and (Test-Path $composeFile)) {
-    Push-Location $Root
-    try {
-      Log "Stopping Compose api container so host can bind ports"
-      & $dockerExe compose stop api
-      & $dockerExe compose rm -f api
-    } catch {
-      Log ("WARNING: compose stop/rm failed: {0}" -f $_.Exception.Message)
-    } finally {
-      Pop-Location
-    }
+# 3) Restart API via scheduled tasks (SYSTEM) so it survives SSH logoff.
+# Start-Process uvicorn from this session dies when deploy SSH ends.
+Log "Restarting API scheduled tasks"
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and $_.CommandLine -like "*uvicorn*app.main*" } |
+  ForEach-Object {
+    Log ("Stop uvicorn pid={0}" -f $_.ProcessId)
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
   }
-  foreach ($name in @("FinhubkhApi80", "FinhubkhApi8788")) {
-    $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-    if ($task) {
-      Log "Stopping scheduled task $name"
-      Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-    }
-  }
-  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine -like "*uvicorn*app.main*" } |
-    ForEach-Object {
-      Log ("Stop uvicorn pid={0}" -f $_.ProcessId)
-      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-  # Free ports in case Docker/old processes still hold them
-  Stop-ListenersOnPort 80
-  Stop-ListenersOnPort 8788
-  Start-Sleep -Seconds 2
-  Log "Starting API :80 via venv"
+Stop-ListenersOnPort 80
+Stop-ListenersOnPort 8788
+Start-Sleep -Seconds 2
+
+$api80 = Restart-NamedTask "FinhubkhApi80"
+$api8788 = Restart-NamedTask "FinhubkhApi8788"
+if (-not ($api80 -or $api8788)) {
+  Log "No API scheduled tasks - starting uvicorn as last resort"
   Start-Process -FilePath $VenvPy -ArgumentList "-m","uvicorn","app.main:app","--host","0.0.0.0","--port","80" -WorkingDirectory $Root -WindowStyle Hidden
-  Log "Starting API :8788 via venv"
   Start-Process -FilePath $VenvPy -ArgumentList "-m","uvicorn","app.main:app","--host","0.0.0.0","--port","8788" -WorkingDirectory $Root -WindowStyle Hidden
 }
 
@@ -155,10 +114,13 @@ Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
   }
 Start-Sleep -Seconds 2
-Start-Process -FilePath $VenvPy -ArgumentList "-m","workers.supervisor" -WorkingDirectory $Root -WindowStyle Minimized
+if (-not (Restart-NamedTask "FinhubkhMt5Worker")) {
+  Log "Starting workers.supervisor via process (no FinhubkhMt5Worker task)"
+  Start-Process -FilePath $VenvPy -ArgumentList "-m","workers.supervisor" -WorkingDirectory $Root -WindowStyle Minimized
+}
 
 # 5) Health
-Start-Sleep -Seconds 4
+Start-Sleep -Seconds 6
 try {
   $h = (Invoke-WebRequest -UseBasicParsing http://127.0.0.1/health -TimeoutSec 10).Content
   Log "health $h"
@@ -171,7 +133,6 @@ try {
   }
 }
 
-# Cleanup staging
 if (Test-Path $Staging) {
   Remove-Item $Staging -Recurse -Force -ErrorAction SilentlyContinue
   Log "Removed staging"
