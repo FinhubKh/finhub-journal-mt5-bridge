@@ -30,26 +30,27 @@ def trades_to_rows(trades: list, user_id: str, matched_account: dict, source: st
         pnl = resolve_pnl_usd(t, matched_account)
         close_time = t.get("close_time") or t.get("open_time") or datetime.now(timezone.utc).isoformat()
         open_time = t.get("open_time") or close_time
-        rows.append(
-            {
-                "user_id": user_id,
-                "source": source,
-                "ticket": t["ticket"],
-                "symbol": t.get("symbol"),
-                "direction": t.get("direction"),
-                "entry_price": t.get("entry_price"),
-                "exit_price": t.get("exit_price"),
-                "lot_size": t.get("lot_size"),
-                "pnl_usd": pnl,
-                "r_value": float(t.get("r_value") or 0),
-                "result": "win" if pnl > 0 else "loss" if pnl < 0 else "be",
-                "open_time": open_time,
-                "close_time": close_time,
-                "date": str(close_time)[:10],
-                "account": account_label,
-                "account_id": matched_account["id"],
-            }
-        )
+        row = {
+            "user_id": user_id,
+            "source": source,
+            "ticket": t["ticket"],
+            "symbol": t.get("symbol"),
+            "direction": t.get("direction"),
+            "entry_price": t.get("entry_price"),
+            "exit_price": t.get("exit_price"),
+            "lot_size": t.get("lot_size"),
+            "pnl_usd": pnl,
+            "result": "win" if pnl > 0 else "loss" if pnl < 0 else "be",
+            "open_time": open_time,
+            "close_time": close_time,
+            "date": str(close_time)[:10],
+            "account": account_label,
+            "account_id": matched_account["id"],
+        }
+        r_value = float(t.get("r_value") or 0)
+        if abs(r_value) > 0.01:
+            row["r_value"] = r_value
+        rows.append(row)
     return rows
 
 

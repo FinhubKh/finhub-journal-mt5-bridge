@@ -21,6 +21,25 @@ def _deal_fees(deal: dict) -> float:
     )
 
 
+def _sl_price(ins: list, exit_: dict) -> float:
+    for d in (exit_, *(ins or [])):
+        sl = float(d.get("sl") or 0)
+        if sl > 0:
+            return sl
+    return 0.0
+
+
+def _r_multiple(entry_price: float, exit_price: float, sl_price: float, pnl: float) -> float:
+    if sl_price <= 0 or entry_price <= 0:
+        return 0.0
+    risk = abs(entry_price - sl_price)
+    if risk <= 0:
+        return 0.0
+    rr = abs(exit_price - entry_price) / risk
+    signed = rr if pnl >= 0 else -rr
+    return round(signed, 2)
+
+
 def _vwap_price(deals: list) -> float:
     total_vol = sum(float(d.get("volume") or 0) for d in deals)
     if total_vol <= 0:
@@ -84,17 +103,20 @@ def deals_to_trades(deals: list) -> list:
             else:
                 ticket = int(exit_.get("order") or exit_.get("ticket"))
 
+            sl_price = _sl_price(ins, exit_)
+            exit_price = float(exit_.get("price") or 0)
             out.append(
                 {
                     "ticket": ticket,
                     "symbol": exit_.get("symbol") or (first_entry or {}).get("symbol"),
                     "direction": direction,
                     "entry_price": float(entry_price),
-                    "exit_price": float(exit_.get("price") or 0),
+                    "exit_price": exit_price,
                     "lot_size": float(exit_.get("volume") or 0),
                     "pnl_raw": pnl_raw,
                     "pnl_usd": pnl_raw,
-                    "r_value": 0,
+                    "r_value": _r_multiple(float(entry_price), exit_price, sl_price, pnl_raw),
+                    "sl_price": sl_price,
                     "open_time": open_time,
                     "close_time": _iso(exit_.get("time")),
                 }

@@ -48,6 +48,7 @@ class MetaTrader5Adapter:
                     "profit": float(d.profit),
                     "swap": float(d.swap),
                     "commission": float(d.commission),
+                    "sl": float(getattr(d, "sl", 0) or 0),
                     "time": d.time,
                 }
             )

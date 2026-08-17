@@ -43,3 +43,16 @@ def test_partial_closes_emit_one_trade_per_exit():
     assert trades[1]["pnl_raw"] == 117  # 120 - 2 - 1
     assert trades[0]["direction"] == "buy"
     assert trades[1]["entry_price"] == 2000.0
+
+
+def test_r_multiple_from_exit_stop():
+    deals = [
+        {"ticket": 1, "order": 10, "position_id": 99, "entry": "in", "type": "buy",
+         "symbol": "EURUSD", "price": 1.10, "volume": 0.5, "profit": 0, "swap": 0,
+         "commission": 0, "sl": 1.09, "time": "2026-01-01T10:00:00Z"},
+        {"ticket": 2, "order": 11, "position_id": 99, "entry": "out", "type": "sell",
+         "symbol": "EURUSD", "price": 1.12, "volume": 0.5, "profit": 100, "swap": 0,
+         "commission": 0, "sl": 1.09, "time": "2026-01-01T12:00:00Z"},
+    ]
+    trades = deals_to_trades(deals)
+    assert trades[0]["r_value"] == 2.0
