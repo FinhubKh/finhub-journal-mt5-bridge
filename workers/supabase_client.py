@@ -127,17 +127,31 @@ def upsert_trades(
 
     rows = trades_to_rows(trades, account["user_id"], account, "investor_bridge")
     url = f"{supabase_url.rstrip('/')}/rest/v1/trades?on_conflict=account_id,ticket"
+    without_r = [{k: v for k, v in row.items() if k != "r_value"} for row in rows]
+    with_r = [row for row in rows if "r_value" in row]
     res = client.post(
         url,
         headers=supabase_headers(
             service_key,
             {"Prefer": "resolution=merge-duplicates,return=representation"},
         ),
-        json=rows,
+        json=without_r,
         timeout=60.0,
     )
     if res.status_code >= 400:
         raise RuntimeError(res.text or f"Failed to save trades ({res.status_code})")
+    if with_r:
+        r_res = client.post(
+            url,
+            headers=supabase_headers(
+                service_key,
+                {"Prefer": "resolution=merge-duplicates,return=representation"},
+            ),
+            json=with_r,
+            timeout=60.0,
+        )
+        if r_res.status_code >= 400:
+            raise RuntimeError(r_res.text or f"Failed to save trade R ({r_res.status_code})")
 
     synced_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     _patch_investor_credentials(
