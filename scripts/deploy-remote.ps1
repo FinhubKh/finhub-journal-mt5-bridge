@@ -19,7 +19,7 @@ if (-not (Test-Path $Root)) {
   throw "Missing bridge root $Root"
 }
 if (-not (Test-Path "$Root\.env")) {
-  throw "Missing $Root\.env — refuse deploy without env"
+  throw "Missing $Root\.env - refuse deploy without env"
 }
 if (-not (Test-Path $VenvPy)) {
   throw "Missing venv python at $VenvPy"
@@ -46,7 +46,7 @@ if (Test-Path $Staging) {
     }
   }
 } else {
-  Log "No staging dir — refreshing deps/services only"
+  Log "No staging dir - refreshing deps/services only"
 }
 
 # 2) Dependencies (venv only)
@@ -57,7 +57,7 @@ if ($LASTEXITCODE -ne 0) { throw "pip install requirements failed" }
 & $Pip install "MetaTrader5>=5.0.45" "numpy<2" pywin32 psutil
 if ($LASTEXITCODE -ne 0) { throw "pip install MT5 extras failed" }
 
-# 3) Restart API — prefer Docker Compose (Redis + API); fall back to host uvicorn.
+# 3) Restart API - prefer Docker Compose (Redis + API); fall back to host uvicorn.
 function Resolve-DockerExe {
   $cmd = Get-Command docker -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
@@ -92,7 +92,7 @@ if ((Test-Path $composeFile) -and $dockerExe) {
   try {
     & $dockerExe compose up -d --build --force-recreate api
     if ($LASTEXITCODE -ne 0) {
-      Log ("WARNING: docker compose failed code={0} — falling back to host uvicorn" -f $LASTEXITCODE)
+      Log ("WARNING: docker compose failed code={0} - falling back to host uvicorn" -f $LASTEXITCODE)
     } else {
       $apiRestarted = $true
       Start-Sleep -Seconds 5
