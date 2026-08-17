@@ -106,6 +106,18 @@ if ((Test-Path $composeFile) -and $dockerExe) {
 
 if (-not $apiRestarted) {
   Log "Restarting host uvicorn on :80 and :8788"
+  if ($dockerExe -and (Test-Path $composeFile)) {
+    Push-Location $Root
+    try {
+      Log "Stopping Compose api container so host can bind ports"
+      & $dockerExe compose stop api
+      & $dockerExe compose rm -f api
+    } catch {
+      Log ("WARNING: compose stop/rm failed: {0}" -f $_.Exception.Message)
+    } finally {
+      Pop-Location
+    }
+  }
   foreach ($name in @("FinhubkhApi80", "FinhubkhApi8788")) {
     $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     if ($task) {
