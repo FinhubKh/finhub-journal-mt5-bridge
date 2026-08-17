@@ -145,21 +145,16 @@ def queue_depth(redis_client, queue_key: str) -> dict:
 def claim_job(redis_client, queue_key: str, timeout: int = 5):
     """Claim the next job into a processing list (crash-recoverable) and resolve payload.
 
-    Pops from the LEFT (same as blpop) so verify lpush priority and sync rpush
-    FIFO order stay correct. Never use brpoplpush here — that pops the RIGHT.
+    Always BLPOP from the LEFT so verify lpush priority and sync rpush FIFO stay
+    correct. Do not use BLMOVE here — Windows Redis / redis-py argument order
+    can wait on the wrong list and leave jobs pending forever.
     """
     processing = _processing_key(queue_key)
-    item = None
-    blmove = getattr(redis_client, "blmove", None)
-    if callable(blmove):
-        # Atomic LEFT→RIGHT move into the processing list.
-        item = blmove(queue_key, processing, float(timeout), "LEFT", "RIGHT")
-    else:
-        popped = redis_client.blpop(queue_key, timeout=timeout)
-        if not popped:
-            return None
-        _key, item = popped
-        redis_client.rpush(processing, item)
+    popped = redis_client.blpop(queue_key, timeout=timeout)
+    if not popped:
+        return None
+    _key, item = popped
+    redis_client.rpush(processing, item)
 
     if not item:
         return None

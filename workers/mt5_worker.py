@@ -4,7 +4,7 @@ import httpx
 
 from jobqueue.redis_lock import RedisLock
 from jobqueue.redis_queue import set_job_result
-from workers.supabase_client import fetch_investor_credentials, record_sync_error, record_sync_success, upsert_trades
+from workers.supabase_client import fetch_investor_credentials, record_sync_error, record_sync_success, set_sync_stage, upsert_trades
 from workers.trade_map import deals_to_trades
 
 LOGIN_FAILED_MSG = "Login failed — check broker server, MT5 login, and investor password"
@@ -223,6 +223,16 @@ def run_sync_job(
         # Hold the lock only for MT5 terminal I/O so another worker can write to DB
         # while this process completes HTTP upserts.
         try:
+            try:
+                set_sync_stage(
+                    http,
+                    supabase_url=supabase_url,
+                    service_key=service_key,
+                    trading_account_id=trading_account_id,
+                    stage="connecting",
+                )
+            except Exception:
+                pass
             login_ok = bool(
                 mt5.initialize(
                     terminal_path,
@@ -234,6 +244,16 @@ def run_sync_job(
             )
             error_detail = "" if login_ok else _mt5_error_detail(mt5)
             if login_ok:
+                try:
+                    set_sync_stage(
+                        http,
+                        supabase_url=supabase_url,
+                        service_key=service_key,
+                        trading_account_id=trading_account_id,
+                        stage="fetching_history",
+                    )
+                except Exception:
+                    pass
                 date_from, date_to, sync_kind = _resolve_sync_window(
                     http,
                     supabase_url=supabase_url,
@@ -290,6 +310,16 @@ def run_sync_job(
             )
             return _store(_sync_result(job, ok=False, error=error_code))
 
+        try:
+            set_sync_stage(
+                http,
+                supabase_url=supabase_url,
+                service_key=service_key,
+                trading_account_id=trading_account_id,
+                stage="saving_trades",
+            )
+        except Exception:
+            pass
         saved = upsert_trades(
             http,
             supabase_url=supabase_url,

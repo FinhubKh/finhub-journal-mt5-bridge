@@ -9,6 +9,7 @@ from jobqueue.redis_queue import ack_job, claim_job, enqueue_job, recover_stale_
 from workers.credentials import CredentialsError, resolve_job_credentials
 from workers.logging_setup import get_logger
 from workers.mt5_worker import run_sync_job, run_verify_job
+from workers.supabase_client import record_sync_error
 from workers.terminal_map import resolve_terminal_path
 
 
@@ -64,7 +65,12 @@ def main() -> None:
                     log.exception("Failed recovering stale processing jobs")
                 last_recover = now
 
-            job = claim_job(client, settings.redis_queue_key, timeout=5)
+            try:
+                job = claim_job(client, settings.redis_queue_key, timeout=5)
+            except Exception:
+                log.exception("Failed claiming next job")
+                time.sleep(1)
+                continue
             if not job:
                 continue
             job_type = str(job.get("job_type") or "sync")
@@ -93,6 +99,17 @@ def main() -> None:
                             "error": str(exc),
                         },
                     )
+                if account_id and job_type != "verify":
+                    try:
+                        record_sync_error(
+                            http,
+                            supabase_url=settings.supabase_url,
+                            service_key=settings.supabase_service_role_key,
+                            trading_account_id=str(account_id),
+                            error=str(exc),
+                        )
+                    except Exception:
+                        log.exception("Failed recording credential error account=%s", account_id)
                 ack_job(client, settings.redis_queue_key, job)
                 continue
 

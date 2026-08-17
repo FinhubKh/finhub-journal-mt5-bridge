@@ -118,9 +118,26 @@ def upsert_trades(
         supabase_url=supabase_url,
         service_key=service_key,
         trading_account_id=trading_account_id,
-        payload={"last_synced_at": synced_at, "last_sync_error": None},
+        payload={"last_synced_at": synced_at, "last_sync_error": None, "sync_stage": None},
     )
     return {"inserted": len(res.json()), "last_synced_at": synced_at}
+
+
+def set_sync_stage(
+    client: httpx.Client,
+    *,
+    supabase_url: str,
+    service_key: str,
+    trading_account_id: str,
+    stage: str,
+) -> None:
+    _patch_investor_credentials(
+        client,
+        supabase_url=supabase_url,
+        service_key=service_key,
+        trading_account_id=trading_account_id,
+        payload={"sync_stage": stage, "last_sync_error": None},
+    )
 
 
 def record_sync_success(
@@ -137,7 +154,7 @@ def record_sync_success(
         supabase_url=supabase_url,
         service_key=service_key,
         trading_account_id=trading_account_id,
-        payload={"last_synced_at": synced_at, "last_sync_error": None},
+        payload={"last_synced_at": synced_at, "last_sync_error": None, "sync_stage": None},
     )
     return synced_at
 
