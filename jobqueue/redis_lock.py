@@ -1,6 +1,15 @@
 import time
 import uuid
 
+# Atomic compare-and-delete so we never release another worker's lock.
+_RELEASE_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+else
+  return 0
+end
+"""
+
 
 def lock_held(redis_client, key: str) -> bool:
     return bool(redis_client.get(key))
@@ -35,6 +44,9 @@ class RedisLock:
 
     def release(self) -> None:
         try:
+            if hasattr(self.client, "eval"):
+                self.client.eval(_RELEASE_LUA, 1, self.key, self.token)
+                return
             if self.client.get(self.key) == self.token:
                 self.client.delete(self.key)
         except Exception:

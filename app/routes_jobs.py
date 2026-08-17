@@ -14,16 +14,24 @@ router = APIRouter()
 
 class SyncJobBody(BaseModel):
     trading_account_id: str = Field(min_length=1)
-    login: str = Field(min_length=1)
-    password: str = Field(min_length=1)
-    server: str = Field(min_length=1)
+    # Optional legacy fields — ignored for storage; workers load creds from Supabase.
+    login: str | None = None
+    password: str | None = None
+    server: str | None = None
 
 
 class VerifyJobBody(BaseModel):
     trading_account_id: str = Field(min_length=1)
-    login: str = Field(min_length=1)
-    password: str = Field(min_length=1)
-    server: str = Field(min_length=1)
+    login: str | None = None
+    password: str | None = None
+    server: str | None = None
+
+
+def _workers_alive(redis_client, heartbeat_key: str) -> bool | None:
+    try:
+        return bool(redis_client.get(heartbeat_key))
+    except Exception:
+        return None
 
 
 def _system_status(request: Request) -> dict:
@@ -31,23 +39,33 @@ def _system_status(request: Request) -> dict:
     redis_client = request.app.state.redis
     redis_ok = True
     redis_error = None
-    depth = {"pending_jobs": None, "pending_accounts": None}
+    depth = {"pending_jobs": None, "pending_accounts": None, "processing_jobs": None}
     mt5_locked = None
+    workers_alive = None
     try:
         redis_client.ping()
         depth = queue_depth(redis_client, settings.redis_queue_key)
         mt5_locked = lock_held(redis_client, settings.mt5_lock_key)
+        workers_alive = _workers_alive(redis_client, settings.worker_heartbeat_key)
     except Exception as exc:
         redis_ok = False
         redis_error = str(exc)
+    overall_ok = redis_ok
     return {
-        "ok": redis_ok,
+        "ok": overall_ok,
         "time": datetime.now(timezone.utc).isoformat(),
         "redis": {"ok": redis_ok, "error": redis_error},
         "queue": depth,
         "mt5_lock_held": mt5_locked,
+        "workers_alive": workers_alive,
         "worker_pool_size": settings.worker_pool_size,
     }
+
+
+def _require_bridge_token(request: Request, x_bridge_token: str | None) -> None:
+    settings = request.app.state.settings
+    if not token_ok(x_bridge_token or "", settings.bridge_service_token):
+        raise HTTPException(status_code=401, detail="Invalid bridge token")
 
 
 @router.get("/health")
@@ -59,7 +77,15 @@ def health(request: Request, response: Response):
 
 
 @router.get("/", response_class=HTMLResponse)
-def root(request: Request):
+def root(
+    request: Request,
+    x_bridge_token: str | None = Header(default=None),
+    token: str | None = None,
+):
+    settings = request.app.state.settings
+    provided = x_bridge_token or token or ""
+    if not token_ok(provided, settings.bridge_service_token):
+        raise HTTPException(status_code=401, detail="Invalid bridge token")
     return _render_dashboard(_system_status(request))
 
 
@@ -69,11 +95,13 @@ def create_sync_job(
     request: Request,
     x_bridge_token: str | None = Header(default=None),
 ):
+    _require_bridge_token(request, x_bridge_token)
     settings = request.app.state.settings
-    if not token_ok(x_bridge_token or "", settings.bridge_service_token):
-        raise HTTPException(status_code=401, detail="Invalid bridge token")
-    payload = body.model_dump()
-    payload["job_type"] = "sync"
+    # Never persist investor passwords in the Redis queue.
+    payload = {
+        "trading_account_id": body.trading_account_id,
+        "job_type": "sync",
+    }
     job_id = enqueue_job(
         request.app.state.redis,
         settings.redis_queue_key,
@@ -94,11 +122,12 @@ def create_verify_job(
     request: Request,
     x_bridge_token: str | None = Header(default=None),
 ):
+    _require_bridge_token(request, x_bridge_token)
     settings = request.app.state.settings
-    if not token_ok(x_bridge_token or "", settings.bridge_service_token):
-        raise HTTPException(status_code=401, detail="Invalid bridge token")
-    payload = body.model_dump()
-    payload["job_type"] = "verify"
+    payload = {
+        "trading_account_id": body.trading_account_id,
+        "job_type": "verify",
+    }
     job_id = enqueue_job(
         request.app.state.redis,
         settings.redis_queue_key,
@@ -119,9 +148,8 @@ def job_result(
     request: Request,
     x_bridge_token: str | None = Header(default=None),
 ):
+    _require_bridge_token(request, x_bridge_token)
     settings = request.app.state.settings
-    if not token_ok(x_bridge_token or "", settings.bridge_service_token):
-        raise HTTPException(status_code=401, detail="Invalid bridge token")
     result = get_job_result(request.app.state.redis, settings.redis_queue_key, job_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Unknown job")
@@ -138,13 +166,19 @@ def _render_dashboard(status: dict) -> str:
     redis_ok = status["redis"]["ok"]
     redis_error = status["redis"]["error"]
     queue = status["queue"]
-    overall_ok = status["ok"]
+    workers_alive = status.get("workers_alive")
+    overall_ok = redis_ok and (workers_alive is not False)
     mt5_locked = status["mt5_lock_held"]
 
     error_row = f'<p class="error">{html.escape(redis_error)}</p>' if redis_error else ""
     pending_jobs = queue["pending_jobs"] if queue["pending_jobs"] is not None else "—"
     pending_accounts = queue["pending_accounts"] if queue["pending_accounts"] is not None else "—"
+    processing_jobs = queue.get("processing_jobs")
+    processing_text = "—" if processing_jobs is None else processing_jobs
     lock_text = "—" if mt5_locked is None else ("Held" if mt5_locked else "Free")
+    workers_text = (
+        "—" if workers_alive is None else ("Alive" if workers_alive else "No heartbeat")
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -211,6 +245,10 @@ def _render_dashboard(status: dict) -> str:
       <div class="value">{_badge(redis_ok)}</div>
     </div>
     <div class="card">
+      <div class="label">Workers</div>
+      <div class="value">{workers_text}</div>
+    </div>
+    <div class="card">
       <div class="label">MT5 Lock</div>
       <div class="value">{lock_text}</div>
     </div>
@@ -221,6 +259,10 @@ def _render_dashboard(status: dict) -> str:
     <div class="card">
       <div class="label">Pending Accounts</div>
       <div class="value">{pending_accounts}</div>
+    </div>
+    <div class="card">
+      <div class="label">Processing</div>
+      <div class="value">{processing_text}</div>
     </div>
     <div class="card">
       <div class="label">Worker Pool Size</div>

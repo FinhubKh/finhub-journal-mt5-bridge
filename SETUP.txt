@@ -23,6 +23,7 @@ Configuration
   Copy .env.example to .env and fill in:
     BRIDGE_SERVICE_TOKEN - shared secret with finhubkh_journal (openssl rand -hex 32)
     SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY - bridge upserts trades directly into DB
+    INVESTOR_CRED_ENCRYPTION_KEY - same 64-hex key as the journal (decrypt at worker)
     REDIS_URL - use redis://127.0.0.1:6379/0 for the HOST worker
     MT5_TERMINAL_PATH - full path to terminal64.exe (doubled backslashes in .env)
     WORKER_POOL_SIZE, HISTORY_LOOKBACK_DAYS, etc.
@@ -138,18 +139,20 @@ Performance notes
   - WORKER_POOL_SIZE=2 lets one worker write to Supabase while another uses MT5.
   - Redis is tuned for a queue workload (AOF everysec, no RDB snapshots, noeviction).
 
-Delivery semantics (v1)
-  Sync jobs are at-most-once if a worker hard-crashes mid-job (the job is already removed
-  from the queue and is not recovered). Transient worker exceptions may requeue once
-  (attempt counter on the job payload). Successful or handled failures (bad credentials,
-  empty history) are not retried automatically. Lock-wait timeouts requeue without
-  burning that retry budget.
-
 Security notes
   - Redis is published only on 127.0.0.1:6379. Do not change that to 0.0.0.0.
-  - Job queue payloads may contain investor passwords briefly while workers process jobs.
+  - Job queue payloads do NOT contain investor passwords (workers decrypt from
+    Supabase using INVESTOR_CRED_ENCRYPTION_KEY — same key as the journal).
   - BRIDGE_SERVICE_TOKEN must match the journal; never commit .env.
+  - Dashboard at / requires the bridge token (?token= or x-bridge-token).
+  - Prefer Cloudflare Full (strict) TLS to the VM (not Flexible) for bridge.finhubkh.com.
   - Prefer binding/exposing API 8788 only to your journal network / VPN / firewall allowlist.
+
+Delivery semantics
+  - Claimed jobs move to a processing list with metadata; workers ack on finish.
+  - Stale processing jobs (worker crash) are requeued after PROCESSING_STALE_SECONDS.
+  - Sync jobs still only auto-retry once on unhandled exceptions.
+  - Lock-wait timeouts requeue without burning that retry budget.
 
 Non-Docker fallback (API on host)
   If you cannot run Docker Linux containers on the VPS:

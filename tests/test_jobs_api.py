@@ -77,7 +77,6 @@ def test_health():
         redis_client=FakeRedis(),
         settings_overrides={
             "bridge_service_token": "tok",
-            "journal_bridge_sync_url": "http://journal/v1/bridge/sync",
             "redis_queue_key": "q",
         },
     )
@@ -87,8 +86,10 @@ def test_health():
     body = res.json()
     assert body["ok"] is True
     assert body["redis"] == {"ok": True, "error": None}
-    assert body["queue"] == {"pending_jobs": 0, "pending_accounts": 0}
+    assert body["queue"]["pending_jobs"] == 0
+    assert body["queue"]["pending_accounts"] == 0
     assert body["mt5_lock_held"] is False
+    assert "workers_alive" in body
 
 
 def test_health_reports_down_when_redis_unreachable():
@@ -96,7 +97,6 @@ def test_health_reports_down_when_redis_unreachable():
         redis_client=FakeRedis(ping_error=ConnectionError("boom")),
         settings_overrides={
             "bridge_service_token": "tok",
-            "journal_bridge_sync_url": "http://journal/v1/bridge/sync",
             "redis_queue_key": "q",
         },
     )
@@ -108,17 +108,28 @@ def test_health_reports_down_when_redis_unreachable():
     assert body["redis"]["error"] == "boom"
 
 
-def test_root_renders_html_dashboard():
+def test_root_requires_token():
     app = create_app(
         redis_client=FakeRedis(),
         settings_overrides={
             "bridge_service_token": "tok",
-            "journal_bridge_sync_url": "http://journal/v1/bridge/sync",
             "redis_queue_key": "q",
         },
     )
     client = TestClient(app)
-    res = client.get("/")
+    assert client.get("/").status_code == 401
+
+
+def test_root_renders_html_dashboard_with_token():
+    app = create_app(
+        redis_client=FakeRedis(),
+        settings_overrides={
+            "bridge_service_token": "tok",
+            "redis_queue_key": "q",
+        },
+    )
+    client = TestClient(app)
+    res = client.get("/", headers={"x-bridge-token": "tok"})
     assert res.status_code == 200
     assert "text/html" in res.headers["content-type"]
     assert "FinHub MT5 Bridge" in res.text
@@ -129,25 +140,23 @@ def test_jobs_sync_requires_token():
         redis_client=FakeRedis(),
         settings_overrides={
             "bridge_service_token": "tok",
-            "journal_bridge_sync_url": "http://journal/v1/bridge/sync",
             "redis_queue_key": "q",
         },
     )
     client = TestClient(app)
     res = client.post(
         "/jobs/sync",
-        json={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
+        json={"trading_account_id": "a1"},
     )
     assert res.status_code == 401
 
 
-def test_jobs_sync_enqueues():
+def test_jobs_sync_enqueues_without_password():
     fake = FakeRedis()
     app = create_app(
         redis_client=fake,
         settings_overrides={
             "bridge_service_token": "tok",
-            "journal_bridge_sync_url": "http://journal/v1/bridge/sync",
             "redis_queue_key": "q",
         },
     )
@@ -161,6 +170,8 @@ def test_jobs_sync_enqueues():
     body = res.json()
     assert body["job_id"]
     assert len(fake.lists["q"]) == 1
+    latest = next(iter(fake.hashes["q:latest"].values()))
+    assert "password" not in latest
 
 
 def test_jobs_verify_enqueues_and_marks_pending():
@@ -169,7 +180,6 @@ def test_jobs_verify_enqueues_and_marks_pending():
         redis_client=fake,
         settings_overrides={
             "bridge_service_token": "tok",
-            "journal_bridge_sync_url": "http://journal/v1/bridge/sync",
             "redis_queue_key": "q",
         },
     )
@@ -177,7 +187,7 @@ def test_jobs_verify_enqueues_and_marks_pending():
     res = client.post(
         "/jobs/verify",
         headers={"x-bridge-token": "tok"},
-        json={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
+        json={"trading_account_id": "a1"},
     )
     assert res.status_code == 202
     body = res.json()
@@ -194,7 +204,6 @@ def test_jobs_result_returns_stored_payload():
         redis_client=fake,
         settings_overrides={
             "bridge_service_token": "tok",
-            "journal_bridge_sync_url": "http://journal/v1/bridge/sync",
             "redis_queue_key": "q",
         },
     )
@@ -210,7 +219,6 @@ def test_jobs_result_404_when_unknown():
         redis_client=fake,
         settings_overrides={
             "bridge_service_token": "tok",
-            "journal_bridge_sync_url": "http://journal/v1/bridge/sync",
             "redis_queue_key": "q",
         },
     )

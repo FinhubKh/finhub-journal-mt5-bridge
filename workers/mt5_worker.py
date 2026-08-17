@@ -4,7 +4,7 @@ import httpx
 
 from jobqueue.redis_lock import RedisLock
 from jobqueue.redis_queue import set_job_result
-from workers.supabase_client import fetch_investor_credentials, record_sync_error, upsert_trades
+from workers.supabase_client import fetch_investor_credentials, record_sync_error, record_sync_success, upsert_trades
 from workers.trade_map import deals_to_trades
 
 LOGIN_FAILED_MSG = "Login failed — check broker server, MT5 login, and investor password"
@@ -15,7 +15,6 @@ INCREMENTAL_SYNC_OVERLAP_HOURS = 24
 
 
 NO_TRADES_EVER_MSG = "No trade history found — this account hasn't placed any trades yet"
-NO_NEW_TRADES_MSG = "No new trades since last sync"
 NO_TRADES_UNKNOWN_MSG = "No closed trades found in lookback window"
 
 
@@ -265,9 +264,22 @@ def run_sync_job(
 
         trades = deals_to_trades(deals or [])
         if not trades:
+            if sync_kind == "incremental":
+                # Nothing new is a successful sync — advance the watermark so the
+                # UI doesn't treat an idle account as failed.
+                try:
+                    record_sync_success(
+                        http,
+                        supabase_url=supabase_url,
+                        service_key=service_key,
+                        trading_account_id=trading_account_id,
+                    )
+                except Exception:
+                    pass
+                return _store(_sync_result(job, ok=True, count=0))
+
             msg, error_code = {
                 "first": (NO_TRADES_EVER_MSG, "no_trades"),
-                "incremental": (NO_NEW_TRADES_MSG, "no_new_trades"),
             }.get(sync_kind, (NO_TRADES_UNKNOWN_MSG, "no_trades"))
             record_sync_error(
                 http,

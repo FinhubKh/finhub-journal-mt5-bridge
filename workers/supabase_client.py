@@ -58,7 +58,7 @@ def fetch_investor_credentials(
 ) -> dict | None:
     url = (
         f"{supabase_url.rstrip('/')}/rest/v1/investor_credentials"
-        f"?select=last_synced_at"
+        f"?select=last_synced_at,broker_server,login,encrypted_password"
         f"&trading_account_id=eq.{trading_account_id}&limit=1"
     )
     res = client.get(url, headers=supabase_headers(service_key), timeout=30.0)
@@ -99,7 +99,7 @@ def upsert_trades(
         raise LookupError("Trading account not found")
 
     rows = trades_to_rows(trades, account["user_id"], account, "investor_bridge")
-    url = f"{supabase_url.rstrip('/')}/rest/v1/trades?on_conflict=user_id,ticket"
+    url = f"{supabase_url.rstrip('/')}/rest/v1/trades?on_conflict=account_id,ticket"
     res = client.post(
         url,
         headers=supabase_headers(
@@ -121,6 +121,25 @@ def upsert_trades(
         payload={"last_synced_at": synced_at, "last_sync_error": None},
     )
     return {"inserted": len(res.json()), "last_synced_at": synced_at}
+
+
+def record_sync_success(
+    client: httpx.Client,
+    *,
+    supabase_url: str,
+    service_key: str,
+    trading_account_id: str,
+) -> str:
+    """Mark a sync that found zero new trades as successful (advance watermark)."""
+    synced_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    _patch_investor_credentials(
+        client,
+        supabase_url=supabase_url,
+        service_key=service_key,
+        trading_account_id=trading_account_id,
+        payload={"last_synced_at": synced_at, "last_sync_error": None},
+    )
+    return synced_at
 
 
 def record_sync_error(

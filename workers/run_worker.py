@@ -1,10 +1,12 @@
 import os
+import time
 
 import httpx
 
 from app.config import get_settings
 from jobqueue.redis_client import make_redis
-from jobqueue.redis_queue import claim_job, enqueue_job
+from jobqueue.redis_queue import ack_job, claim_job, enqueue_job, recover_stale_processing
+from workers.credentials import CredentialsError, resolve_job_credentials
 from workers.logging_setup import get_logger
 from workers.mt5_worker import run_sync_job, run_verify_job
 from workers.terminal_map import resolve_terminal_path
@@ -15,6 +17,13 @@ def _http_client() -> httpx.Client:
         timeout=httpx.Timeout(60.0, connect=10.0),
         limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
     )
+
+
+def _touch_heartbeat(redis_client, key: str, ttl: int, worker_id: str) -> None:
+    try:
+        redis_client.setex(key, ttl, f"{worker_id}:{int(time.time())}")
+    except Exception:
+        pass
 
 
 def main() -> None:
@@ -32,13 +41,61 @@ def main() -> None:
     mt5 = MetaTrader5Adapter()
     log.info("Worker %s started (pid=%s)", worker_id, os.getpid())
 
+    last_recover = 0.0
     with _http_client() as http:
         while True:
+            _touch_heartbeat(
+                client,
+                settings.worker_heartbeat_key,
+                settings.worker_heartbeat_ttl_seconds,
+                worker_id,
+            )
+            now = time.monotonic()
+            if now - last_recover > 30:
+                try:
+                    n = recover_stale_processing(
+                        client,
+                        settings.redis_queue_key,
+                        max_age_seconds=settings.processing_stale_seconds,
+                    )
+                    if n:
+                        log.warning("Requeued %s stale processing job(s)", n)
+                except Exception:
+                    log.exception("Failed recovering stale processing jobs")
+                last_recover = now
+
             job = claim_job(client, settings.redis_queue_key, timeout=5)
             if not job:
                 continue
             job_type = str(job.get("job_type") or "sync")
             account_id = job.get("trading_account_id")
+            try:
+                job = resolve_job_credentials(
+                    http,
+                    job=job,
+                    supabase_url=settings.supabase_url,
+                    service_key=settings.supabase_service_role_key,
+                    encryption_key=settings.investor_cred_encryption_key,
+                )
+            except CredentialsError as exc:
+                log.warning("Credentials resolve failed account=%s error=%s", account_id, exc)
+                from jobqueue.redis_queue import set_job_result
+
+                if job.get("job_id"):
+                    set_job_result(
+                        client,
+                        settings.redis_queue_key,
+                        job["job_id"],
+                        {
+                            "status": "done",
+                            "ok": False,
+                            "trading_account_id": account_id,
+                            "error": str(exc),
+                        },
+                    )
+                ack_job(client, settings.redis_queue_key, job)
+                continue
+
             terminal_path = resolve_terminal_path(
                 str(job.get("server") or ""),
                 default_path=settings.mt5_terminal_path,
@@ -68,9 +125,10 @@ def main() -> None:
                     )
                     if result.get("ok"):
                         # Queue trade pull after login works — don't make Connect wait on it.
-                        sync_job = dict(job)
-                        sync_job.pop("job_id", None)
-                        sync_job["job_type"] = "sync"
+                        sync_job = {
+                            "trading_account_id": job["trading_account_id"],
+                            "job_type": "sync",
+                        }
                         enqueue_job(client, settings.redis_queue_key, sync_job)
                 else:
                     result = run_sync_job(
@@ -91,15 +149,35 @@ def main() -> None:
                 if result.get("ok"):
                     log.info("%s job succeeded account=%s result=%s", job_type, account_id, result)
                 else:
-                    log.warning("%s job failed account=%s error=%s", job_type, account_id, result.get("error"))
+                    log.warning(
+                        "%s job failed account=%s error=%s",
+                        job_type,
+                        account_id,
+                        result.get("error"),
+                    )
                 if result.get("error") == "mt5_lock_timeout" and job_type != "verify":
                     # Do not burn the retry budget — another worker was using MT5
                     log.warning("Lock timeout, requeueing account=%s", account_id)
-                    enqueue_job(client, settings.redis_queue_key, job)
+                    safe = {
+                        "trading_account_id": job["trading_account_id"],
+                        "job_type": job_type,
+                        "job_id": job.get("job_id"),
+                        "attempt": job.get("attempt"),
+                    }
+                    enqueue_job(client, settings.redis_queue_key, safe)
             except Exception:
                 log.exception("Unhandled error processing %s job account=%s", job_type, account_id)
                 if should_requeue(job):
-                    enqueue_job(client, settings.redis_queue_key, mark_requeue(job))
+                    safe = mark_requeue(
+                        {
+                            "trading_account_id": job["trading_account_id"],
+                            "job_type": job_type,
+                            "attempt": job.get("attempt"),
+                        }
+                    )
+                    enqueue_job(client, settings.redis_queue_key, safe)
+            finally:
+                ack_job(client, settings.redis_queue_key, job)
 
 
 if __name__ == "__main__":

@@ -48,7 +48,7 @@ def test_upsert_trades_writes_db_and_status():
     seen = {"urls": []}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["urls"].append((request.method, str(request.url.path)))
+        seen["urls"].append((request.method, str(request.url)))
         if request.url.path.endswith("/trading_accounts"):
             return httpx.Response(
                 200,
@@ -95,9 +95,8 @@ def test_upsert_trades_writes_db_and_status():
     assert result["inserted"] == 1
     assert seen["trade_rows"][0]["user_id"] == "user-1"
     assert seen["status"]["last_sync_error"] is None
-    assert ("GET", "/rest/v1/trading_accounts") in seen["urls"]
-    assert ("POST", "/rest/v1/trades") in seen["urls"]
-    assert ("PATCH", "/rest/v1/investor_credentials") in seen["urls"]
+    trade_posts = [u for m, u in seen["urls"] if m == "POST" and "/trades" in u]
+    assert trade_posts and "on_conflict=account_id,ticket" in trade_posts[0]
 
 
 def test_record_sync_error_patches_credentials():

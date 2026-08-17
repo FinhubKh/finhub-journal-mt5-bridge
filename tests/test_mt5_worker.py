@@ -52,6 +52,14 @@ class FakeLockRedis:
         self.kv.pop(key, None)
         return 1
 
+    def eval(self, script, numkeys, *args):
+        key = args[0]
+        token = args[1]
+        if self.kv.get(key) == token:
+            self.kv.pop(key, None)
+            return 1
+        return 0
+
 
 def _supabase_transport(on_trades=None, *, last_synced_at=None):
     def handler(request: httpx.Request) -> httpx.Response:
@@ -226,8 +234,8 @@ def test_worker_reports_no_new_trades_on_incremental_sync_with_no_deals():
         redis_client=FakeLockRedis(),
         lock_wait_seconds=1,
     )
-    assert result["ok"] is False
-    assert result["error"] == "no_new_trades"
+    assert result["ok"] is True
+    assert result["count"] == 0
     assert result["status"] == "done"
 
 

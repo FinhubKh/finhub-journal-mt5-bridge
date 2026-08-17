@@ -6,6 +6,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     bridge_service_token: str = ""
+    # Same key as the journal (INVESTOR_CRED_ENCRYPTION_KEY) so workers can
+    # load encrypted investor passwords from Supabase instead of the Redis queue.
+    investor_cred_encryption_key: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "INVESTOR_CRED_ENCRYPTION_KEY",
+            "INVESTOR_ENCRYPTION_KEY",
+        ),
+    )
     supabase_url: str = Field(
         default="",
         validation_alias=AliasChoices("SUPABASE_URL", "VITE_SUPABASE_URL"),
@@ -31,6 +40,9 @@ class Settings(BaseSettings):
     mt5_lock_key: str = "finhubkh:mt5:terminal_lock"
     mt5_lock_ttl_seconds: int = 300
     mt5_lock_wait_seconds: int = 120
+    worker_heartbeat_key: str = "finhubkh:mt5:worker_heartbeat"
+    worker_heartbeat_ttl_seconds: int = 60
+    processing_stale_seconds: int = 900
 
 
 def get_settings() -> Settings:
