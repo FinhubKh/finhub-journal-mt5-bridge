@@ -38,11 +38,11 @@ class Settings(BaseSettings):
     bridge_api_host: str = "0.0.0.0"
     bridge_api_port: int = 8788
     mt5_lock_key: str = "finhubkh:mt5:terminal_lock"
-    mt5_lock_ttl_seconds: int = 300
+    mt5_lock_ttl_seconds: int = 90
     mt5_lock_wait_seconds: int = 120
     worker_heartbeat_key: str = "finhubkh:mt5:worker_heartbeat"
     worker_heartbeat_ttl_seconds: int = 60
-    processing_stale_seconds: int = 900
+    processing_stale_seconds: int = 60
 
 
 def get_settings() -> Settings:

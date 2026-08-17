@@ -42,6 +42,17 @@ def main() -> None:
     mt5 = MetaTrader5Adapter()
     log.info("Worker %s started (pid=%s)", worker_id, os.getpid())
 
+    try:
+        n = recover_stale_processing(
+            client,
+            settings.redis_queue_key,
+            max_age_seconds=0,
+        )
+        if n:
+            log.warning("Requeued %s leftover processing job(s) on startup", n)
+    except Exception:
+        log.exception("Failed recovering leftover processing jobs on startup")
+
     last_recover = 0.0
     with _http_client() as http:
         while True:
