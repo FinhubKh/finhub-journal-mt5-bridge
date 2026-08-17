@@ -122,3 +122,45 @@ def deals_to_trades(deals: list) -> list:
                 }
             )
     return out
+
+
+_CASH_DEAL_TYPES = {"2", "3", "4", "5", "6", "12"}
+_DEAL_TYPE_TO_OP = {
+    "3": "credit",
+    "4": "charge",
+    "5": "correction",
+    "6": "bonus",
+    "12": "interest",
+}
+
+
+def _cash_op_type(deal_type, profit: float) -> str:
+    kind = str(deal_type)
+    if kind == "2":
+        return "deposit" if profit >= 0 else "withdrawal"
+    return _DEAL_TYPE_TO_OP.get(kind, "other")
+
+
+def deals_to_cashflows(deals: list) -> list:
+    """Map MT5 balance / credit / bonus deals to journal cashflows."""
+    out = []
+    for d in deals or []:
+        kind = str(d.get("type") or "")
+        if kind not in _CASH_DEAL_TYPES:
+            continue
+        amount = float(d.get("profit") or 0)
+        if amount == 0:
+            continue
+        when = _iso(d.get("time"))
+        out.append(
+            {
+                "ticket": int(d.get("ticket") or 0),
+                "op_type": _cash_op_type(kind, amount),
+                "amount": amount,
+                "pnl_raw": amount,
+                "comment": d.get("comment") or None,
+                "open_time": when,
+                "close_time": when,
+            }
+        )
+    return [row for row in out if row["ticket"]]

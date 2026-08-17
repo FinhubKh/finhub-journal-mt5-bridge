@@ -54,6 +54,32 @@ def trades_to_rows(trades: list, user_id: str, matched_account: dict, source: st
     return rows
 
 
+def cashflows_to_rows(cashflows: list, user_id: str, matched_account: dict, source: str) -> list[dict]:
+    rows = []
+    for c in cashflows:
+        amount = resolve_pnl_usd(
+            {"pnl_raw": c.get("pnl_raw", c.get("amount")), "pnl_usd": c.get("amount") or c.get("pnl_usd")},
+            matched_account,
+        )
+        if amount == 0:
+            continue
+        occurred = c.get("occurred_at") or c.get("close_time") or c.get("open_time") or datetime.now(timezone.utc).isoformat()
+        rows.append(
+            {
+                "user_id": user_id,
+                "account_id": matched_account["id"],
+                "ticket": c["ticket"],
+                "op_type": c.get("op_type") or ("deposit" if amount >= 0 else "withdrawal"),
+                "amount": amount,
+                "comment": c.get("comment") or None,
+                "occurred_at": occurred,
+                "date": str(occurred)[:10],
+                "source": source,
+            }
+        )
+    return rows
+
+
 def fetch_investor_credentials(
     client: httpx.Client, *, supabase_url: str, service_key: str, trading_account_id: str
 ) -> dict | None:
@@ -122,6 +148,43 @@ def upsert_trades(
         payload={"last_synced_at": synced_at, "last_sync_error": None, "sync_stage": None},
     )
     return {"inserted": len(res.json()), "last_synced_at": synced_at}
+
+
+def upsert_cashflows(
+    client: httpx.Client,
+    *,
+    supabase_url: str,
+    service_key: str,
+    trading_account_id: str,
+    cashflows: list,
+) -> dict:
+    if not cashflows:
+        return {"inserted": 0}
+    account = fetch_trading_account(
+        client,
+        supabase_url=supabase_url,
+        service_key=service_key,
+        trading_account_id=trading_account_id,
+    )
+    if not account:
+        raise LookupError("Trading account not found")
+
+    rows = cashflows_to_rows(cashflows, account["user_id"], account, "investor_bridge")
+    if not rows:
+        return {"inserted": 0}
+    url = f"{supabase_url.rstrip('/')}/rest/v1/account_cashflows?on_conflict=account_id,ticket"
+    res = client.post(
+        url,
+        headers=supabase_headers(
+            service_key,
+            {"Prefer": "resolution=merge-duplicates,return=representation"},
+        ),
+        json=rows,
+        timeout=60.0,
+    )
+    if res.status_code >= 400:
+        raise RuntimeError(res.text or f"Failed to save cashflows ({res.status_code})")
+    return {"inserted": len(res.json())}
 
 
 def set_sync_stage(

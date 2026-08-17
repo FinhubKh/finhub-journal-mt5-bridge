@@ -4,8 +4,8 @@ import httpx
 
 from jobqueue.redis_lock import RedisLock
 from jobqueue.redis_queue import set_job_result
-from workers.supabase_client import fetch_investor_credentials, record_sync_error, record_sync_success, set_sync_stage, upsert_trades
-from workers.trade_map import deals_to_trades
+from workers.supabase_client import fetch_investor_credentials, record_sync_error, record_sync_success, set_sync_stage, upsert_cashflows, upsert_trades
+from workers.trade_map import deals_to_cashflows, deals_to_trades
 
 LOGIN_FAILED_MSG = "Login failed — check broker server, MT5 login, and investor password"
 
@@ -283,7 +283,8 @@ def run_sync_job(
             return _store(_sync_result(job, ok=False, error=msg))
 
         trades = deals_to_trades(deals or [])
-        if not trades:
+        cashflows = deals_to_cashflows(deals or [])
+        if not trades and not cashflows:
             if sync_kind == "incremental":
                 # Nothing new is a successful sync — advance the watermark so the
                 # UI doesn't treat an idle account as failed.
@@ -320,14 +321,32 @@ def run_sync_job(
             )
         except Exception:
             pass
-        saved = upsert_trades(
-            http,
-            supabase_url=supabase_url,
-            service_key=service_key,
-            trading_account_id=trading_account_id,
-            trades=trades,
-        )
-        count = saved.get("inserted", len(trades))
+        count = 0
+        if trades:
+            saved = upsert_trades(
+                http,
+                supabase_url=supabase_url,
+                service_key=service_key,
+                trading_account_id=trading_account_id,
+                trades=trades,
+            )
+            count += saved.get("inserted", len(trades))
+        else:
+            record_sync_success(
+                http,
+                supabase_url=supabase_url,
+                service_key=service_key,
+                trading_account_id=trading_account_id,
+            )
+        if cashflows:
+            saved_cash = upsert_cashflows(
+                http,
+                supabase_url=supabase_url,
+                service_key=service_key,
+                trading_account_id=trading_account_id,
+                cashflows=cashflows,
+            )
+            count += saved_cash.get("inserted", len(cashflows))
         return _store(_sync_result(job, ok=True, count=count))
     except Exception as exc:
         msg = f"Broker server didn't respond, try again ({type(exc).__name__})"

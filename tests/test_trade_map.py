@@ -1,4 +1,4 @@
-from workers.trade_map import deals_to_trades
+from workers.trade_map import deals_to_cashflows, deals_to_trades
 
 
 def test_pairs_entry_and_exit():
@@ -56,3 +56,21 @@ def test_r_multiple_from_exit_stop():
     ]
     trades = deals_to_trades(deals)
     assert trades[0]["r_value"] == 2.0
+
+
+def test_balance_deal_becomes_deposit_or_withdrawal():
+    deals = [
+        {"ticket": 50, "order": 0, "position_id": 0, "entry": "in", "type": "2",
+         "symbol": "", "price": 0, "volume": 0, "profit": 1000, "swap": 0,
+         "commission": 0, "comment": "Deposit", "time": "2026-01-01T09:00:00Z"},
+        {"ticket": 51, "order": 0, "position_id": 0, "entry": "in", "type": "2",
+         "symbol": "", "price": 0, "volume": 0, "profit": -250, "swap": 0,
+         "commission": 0, "comment": "Withdrawal", "time": "2026-01-02T09:00:00Z"},
+    ]
+    flows = deals_to_cashflows(deals)
+    assert len(flows) == 2
+    assert flows[0]["op_type"] == "deposit"
+    assert flows[0]["amount"] == 1000
+    assert flows[1]["op_type"] == "withdrawal"
+    assert flows[1]["amount"] == -250
+    assert deals_to_trades(deals) == []

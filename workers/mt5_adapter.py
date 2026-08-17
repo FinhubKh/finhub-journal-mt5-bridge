@@ -32,7 +32,7 @@ class MetaTrader5Adapter:
         deals = self._mt5.history_deals_get(date_from, date_to) or []
         mapped = []
         for d in deals:
-            # 0 = in, 1 = out — skip balance/credit/other in one pass
+            # Keep IN (0) and OUT (1). Balance ops are type=2 with entry=IN.
             if d.entry not in (0, 1):
                 continue
             mapped.append(
@@ -49,6 +49,7 @@ class MetaTrader5Adapter:
                     "swap": float(d.swap),
                     "commission": float(d.commission),
                     "sl": float(getattr(d, "sl", 0) or 0),
+                    "comment": str(getattr(d, "comment", "") or ""),
                     "time": d.time,
                 }
             )
