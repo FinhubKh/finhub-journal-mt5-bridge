@@ -74,3 +74,13 @@ def test_balance_deal_becomes_deposit_or_withdrawal():
     assert flows[1]["op_type"] == "withdrawal"
     assert flows[1]["amount"] == -250
     assert deals_to_trades(deals) == []
+
+
+def test_balance_deal_with_out_entry_is_not_a_trade():
+    deals = [
+        {"ticket": 50, "order": 0, "position_id": 0, "entry": "out", "type": "2",
+         "symbol": "", "price": 0, "volume": 0, "profit": 1000, "swap": 0,
+         "commission": 0, "comment": "Deposit", "time": "2026-01-01T09:00:00Z"},
+    ]
+    assert deals_to_trades(deals) == []
+    assert deals_to_cashflows(deals)[0]["op_type"] == "deposit"

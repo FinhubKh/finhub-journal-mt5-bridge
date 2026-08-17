@@ -47,6 +47,16 @@ def _vwap_price(deals: list) -> float:
     return sum(float(d.get("price") or 0) * float(d.get("volume") or 0) for d in deals) / total_vol
 
 
+_CASH_DEAL_TYPES = {"2", "3", "4", "5", "6", "12"}
+_DEAL_TYPE_TO_OP = {
+    "3": "credit",
+    "4": "charge",
+    "5": "correction",
+    "6": "bonus",
+    "12": "interest",
+}
+
+
 def deals_to_trades(deals: list) -> list:
     """Map MT5 deals to closed journal trades.
 
@@ -55,6 +65,8 @@ def deals_to_trades(deals: list) -> list:
     """
     by_pos: dict = {}
     for d in deals:
+        if str(d.get("type") or "") in _CASH_DEAL_TYPES:
+            continue
         pos_id = d["position_id"]
         bucket = by_pos.get(pos_id)
         if bucket is None:
@@ -122,16 +134,6 @@ def deals_to_trades(deals: list) -> list:
                 }
             )
     return out
-
-
-_CASH_DEAL_TYPES = {"2", "3", "4", "5", "6", "12"}
-_DEAL_TYPE_TO_OP = {
-    "3": "credit",
-    "4": "charge",
-    "5": "correction",
-    "6": "bonus",
-    "12": "interest",
-}
 
 
 def _cash_op_type(deal_type, profit: float) -> str:

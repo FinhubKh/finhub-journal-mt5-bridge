@@ -94,6 +94,23 @@ def fetch_investor_credentials(
     return rows[0] if rows else None
 
 
+def account_has_cashflows(
+    client: httpx.Client, *, supabase_url: str, service_key: str, trading_account_id: str
+) -> bool:
+    url = (
+        f"{supabase_url.rstrip('/')}/rest/v1/account_cashflows"
+        f"?select=id&account_id=eq.{trading_account_id}&limit=1"
+    )
+    try:
+        res = client.get(url, headers=supabase_headers(service_key), timeout=30.0)
+        if res.status_code >= 400:
+            return False
+        rows = res.json()
+        return bool(rows)
+    except Exception:
+        return False
+
+
 def fetch_trading_account(
     client: httpx.Client, *, supabase_url: str, service_key: str, trading_account_id: str
 ) -> dict | None:

@@ -4,7 +4,15 @@ import httpx
 
 from jobqueue.redis_lock import RedisLock
 from jobqueue.redis_queue import set_job_result
-from workers.supabase_client import fetch_investor_credentials, record_sync_error, record_sync_success, set_sync_stage, upsert_cashflows, upsert_trades
+from workers.supabase_client import (
+    account_has_cashflows,
+    fetch_investor_credentials,
+    record_sync_error,
+    record_sync_success,
+    set_sync_stage,
+    upsert_cashflows,
+    upsert_trades,
+)
 from workers.trade_map import deals_to_cashflows, deals_to_trades
 
 LOGIN_FAILED_MSG = "Login failed — check broker server, MT5 login, and investor password"
@@ -12,6 +20,8 @@ LOGIN_FAILED_MSG = "Login failed — check broker server, MT5 login, and investo
 # Re-pull a little before the last successful sync in case a deal settled
 # late or a prior sync was cut short, without re-walking the full history.
 INCREMENTAL_SYNC_OVERLAP_HOURS = 24
+# First cashflow pull for an account walks ~10 years, matching the EA full-history sync.
+CASHFLOW_BACKFILL_DAYS = 3650
 
 
 NO_TRADES_EVER_MSG = "No trade history found — this account hasn't placed any trades yet"
@@ -43,6 +53,16 @@ def _resolve_sync_window(
             trading_account_id=trading_account_id,
         )
         last_synced_at = (creds or {}).get("last_synced_at")
+        has_cashflows = account_has_cashflows(
+            http,
+            supabase_url=supabase_url,
+            service_key=service_key,
+            trading_account_id=trading_account_id,
+        )
+        if not has_cashflows:
+            return date_to - timedelta(days=CASHFLOW_BACKFILL_DAYS), date_to, (
+                "incremental" if last_synced_at else "first"
+            )
         if last_synced_at:
             since = datetime.fromisoformat(str(last_synced_at).replace("Z", "+00:00"))
             date_from = since - timedelta(hours=INCREMENTAL_SYNC_OVERLAP_HOURS)
@@ -190,7 +210,7 @@ def run_sync_job(
     redis_client=None,
     queue_key: str = "finhubkh:mt5:sync_jobs",
     lock_key: str = "finhubkh:mt5:terminal_lock",
-    lock_ttl_seconds: int = 300,
+    lock_ttl_seconds: int = 600,
     lock_wait_seconds: int = 120,
     init_timeout_ms: int = 15000,
 ) -> dict:

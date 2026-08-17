@@ -3,9 +3,11 @@ import json
 import httpx
 
 from workers.supabase_client import (
+    account_has_cashflows,
     record_sync_error,
     resolve_pnl_usd,
     trades_to_rows,
+    upsert_cashflows,
     upsert_trades,
 )
 
@@ -115,3 +117,66 @@ def test_record_sync_error_patches_credentials():
         error="Invalid investor credentials",
     )
     assert "Invalid" in seen["payload"]["last_sync_error"]
+
+
+def test_account_has_cashflows():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/account_cashflows") and request.method == "GET":
+            return httpx.Response(200, json=[{"id": "c1"}])
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert (
+        account_has_cashflows(
+            client,
+            supabase_url="https://example.supabase.co",
+            service_key="svc",
+            trading_account_id="acct-1",
+        )
+        is True
+    )
+
+
+def test_upsert_cashflows_writes_deposits():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/trading_accounts"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "acct-1",
+                        "user_id": "user-1",
+                        "name": "Live",
+                        "pnl_denomination": "usd",
+                    }
+                ],
+            )
+        if request.url.path.endswith("/account_cashflows"):
+            seen["rows"] = json.loads(request.content.decode())
+            return httpx.Response(201, json=seen["rows"])
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    result = upsert_cashflows(
+        client,
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
+        trading_account_id="acct-1",
+        cashflows=[
+            {
+                "ticket": 50,
+                "op_type": "deposit",
+                "amount": 1000,
+                "pnl_raw": 1000,
+                "comment": "Deposit",
+                "open_time": "2026-01-01T09:00:00Z",
+                "close_time": "2026-01-01T09:00:00Z",
+            }
+        ],
+    )
+    assert result["inserted"] == 1
+    assert seen["rows"][0]["op_type"] == "deposit"
+    assert seen["rows"][0]["amount"] == 1000
+    assert seen["rows"][0]["source"] == "investor_bridge"

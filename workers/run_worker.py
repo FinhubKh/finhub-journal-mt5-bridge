@@ -170,7 +170,7 @@ def main() -> None:
                         redis_client=client,
                         queue_key=settings.redis_queue_key,
                         lock_key=settings.mt5_lock_key,
-                        lock_ttl_seconds=settings.mt5_lock_ttl_seconds,
+                        lock_ttl_seconds=max(600, settings.mt5_lock_ttl_seconds),
                         lock_wait_seconds=settings.mt5_lock_wait_seconds,
                         init_timeout_ms=settings.mt5_init_timeout_ms,
                     )

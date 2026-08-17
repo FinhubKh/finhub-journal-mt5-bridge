@@ -61,7 +61,7 @@ class FakeLockRedis:
         return 0
 
 
-def _supabase_transport(on_trades=None, *, last_synced_at=None):
+def _supabase_transport(on_trades=None, *, last_synced_at=None, cashflow_count=0, on_cashflows=None):
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path.endswith("/trading_accounts"):
@@ -76,6 +76,15 @@ def _supabase_transport(on_trades=None, *, last_synced_at=None):
                     }
                 ],
             )
+        if path.endswith("/account_cashflows"):
+            if request.method == "GET":
+                rows = [{"id": "c1"}] if cashflow_count else []
+                return httpx.Response(200, json=rows)
+            if on_cashflows:
+                on_cashflows(request)
+            import json
+
+            return httpx.Response(201, json=json.loads(request.content.decode() or "[]"))
         if path.endswith("/trades"):
             if on_trades:
                 on_trades(request)
@@ -149,6 +158,123 @@ def test_worker_upserts_trades_on_success():
     assert seen["payload"][0]["source"] == "investor_bridge"
 
 
+def test_worker_upserts_cashflows_from_balance_deals():
+    seen = {}
+
+    def on_cashflows(request: httpx.Request):
+        import json
+
+        seen["payload"] = json.loads(request.content.decode())
+
+    client = httpx.Client(transport=_supabase_transport(on_cashflows=on_cashflows))
+    mt5 = FakeMt5(
+        deals=[
+            {
+                "ticket": 50,
+                "order": 0,
+                "position_id": 0,
+                "entry": "in",
+                "type": "2",
+                "symbol": "",
+                "price": 0,
+                "volume": 0,
+                "profit": 1000,
+                "swap": 0,
+                "commission": 0,
+                "comment": "Deposit",
+                "time": "2026-01-01T09:00:00Z",
+            },
+            {
+                "ticket": 51,
+                "order": 0,
+                "position_id": 0,
+                "entry": "in",
+                "type": "2",
+                "symbol": "",
+                "price": 0,
+                "volume": 0,
+                "profit": -250,
+                "swap": 0,
+                "commission": 0,
+                "comment": "Withdrawal",
+                "time": "2026-01-02T09:00:00Z",
+            },
+        ]
+    )
+    result = run_sync_job(
+        job={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
+        mt5=mt5,
+        http=client,
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
+        terminal_path="C:/mt5/terminal64.exe",
+        lookback_days=90,
+        redis_client=FakeLockRedis(),
+        lock_wait_seconds=1,
+    )
+    assert result["ok"] is True
+    assert result["count"] == 2
+    assert [row["op_type"] for row in seen["payload"]] == ["deposit", "withdrawal"]
+    assert seen["payload"][0]["amount"] == 1000
+    assert seen["payload"][1]["amount"] == -250
+    assert seen["payload"][0]["source"] == "investor_bridge"
+
+
+def test_worker_backfills_cashflows_for_existing_investor_account():
+    from datetime import datetime, timedelta, timezone
+
+    seen = {}
+
+    def on_cashflows(request: httpx.Request):
+        import json
+
+        seen["payload"] = json.loads(request.content.decode())
+
+    last_synced_at = datetime.now(timezone.utc) - timedelta(days=2)
+    client = httpx.Client(
+        transport=_supabase_transport(
+            last_synced_at=last_synced_at.isoformat().replace("+00:00", "Z"),
+            cashflow_count=0,
+            on_cashflows=on_cashflows,
+        )
+    )
+    mt5 = FakeMt5(
+        deals=[
+            {
+                "ticket": 50,
+                "order": 0,
+                "position_id": 0,
+                "entry": "in",
+                "type": "2",
+                "symbol": "",
+                "price": 0,
+                "volume": 0,
+                "profit": 5000,
+                "swap": 0,
+                "commission": 0,
+                "comment": "Deposit",
+                "time": "2024-01-01T09:00:00Z",
+            }
+        ]
+    )
+    before = datetime.now(timezone.utc)
+    result = run_sync_job(
+        job={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
+        mt5=mt5,
+        http=client,
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
+        terminal_path="C:/mt5/terminal64.exe",
+        lookback_days=90,
+        redis_client=FakeLockRedis(),
+        lock_wait_seconds=1,
+    )
+    assert result["ok"] is True
+    assert (before - mt5.seen_date_from).days >= 3600
+    assert seen["payload"][0]["op_type"] == "deposit"
+    assert seen["payload"][0]["amount"] == 5000
+
+
 def test_worker_uses_full_lookback_on_first_sync():
     client = httpx.Client(transport=_supabase_transport())
     mt5 = FakeMt5()
@@ -166,8 +292,36 @@ def test_worker_uses_full_lookback_on_first_sync():
         redis_client=FakeLockRedis(),
         lock_wait_seconds=1,
     )
-    # No last_synced_at on record yet -> falls back to the full 90-day window.
-    assert (before - mt5.seen_date_from).days >= 89
+    # No last_synced_at and no cashflows yet -> walk ~10 years for deposit history.
+    assert (before - mt5.seen_date_from).days >= 3600
+
+
+def test_worker_backfills_cashflows_even_after_prior_trade_sync():
+    from datetime import datetime, timedelta, timezone
+
+    last_synced_at = datetime.now(timezone.utc) - timedelta(days=2)
+    client = httpx.Client(
+        transport=_supabase_transport(
+            last_synced_at=last_synced_at.isoformat().replace("+00:00", "Z"),
+            cashflow_count=0,
+        )
+    )
+    mt5 = FakeMt5()
+    before = datetime.now(timezone.utc)
+    run_sync_job(
+        job={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
+        mt5=mt5,
+        http=client,
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
+        terminal_path="C:/mt5/terminal64.exe",
+        lookback_days=90,
+        redis_client=FakeLockRedis(),
+        lock_wait_seconds=1,
+    )
+    # Existing investor accounts already have last_synced_at from trade-only
+    # syncs, so we still walk ~10 years until at least one cashflow is stored.
+    assert (before - mt5.seen_date_from).days >= 3600
 
 
 def test_worker_uses_incremental_window_after_prior_sync():
@@ -176,7 +330,8 @@ def test_worker_uses_incremental_window_after_prior_sync():
     last_synced_at = datetime.now(timezone.utc) - timedelta(days=2)
     client = httpx.Client(
         transport=_supabase_transport(
-            last_synced_at=last_synced_at.isoformat().replace("+00:00", "Z")
+            last_synced_at=last_synced_at.isoformat().replace("+00:00", "Z"),
+            cashflow_count=1,
         )
     )
     mt5 = FakeMt5()
@@ -220,7 +375,8 @@ def test_worker_reports_no_new_trades_on_incremental_sync_with_no_deals():
     last_synced_at = datetime.now(timezone.utc) - timedelta(days=1)
     client = httpx.Client(
         transport=_supabase_transport(
-            last_synced_at=last_synced_at.isoformat().replace("+00:00", "Z")
+            last_synced_at=last_synced_at.isoformat().replace("+00:00", "Z"),
+            cashflow_count=1,
         )
     )
     result = run_sync_job(
