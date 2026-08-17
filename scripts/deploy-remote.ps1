@@ -57,34 +57,46 @@ if ($LASTEXITCODE -ne 0) { throw "pip install requirements failed" }
 & $Pip install "MetaTrader5>=5.0.45" "numpy<2" pywin32 psutil
 if ($LASTEXITCODE -ne 0) { throw "pip install MT5 extras failed" }
 
-# 3) Restart API (scheduled tasks) — leave Redis + MT5 alone
-foreach ($name in @("FinhubkhApi80", "FinhubkhApi8788")) {
-  $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-  if ($task) {
-    Log "Restarting $name"
-    Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 1
-    # Kill any leftover uvicorn on those ports if task stop was soft
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.CommandLine -and $_.CommandLine -like "*uvicorn*app.main*" } |
-      ForEach-Object {
-        Log ("Stop uvicorn pid={0}" -f $_.ProcessId)
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-      }
-    Start-ScheduledTask -TaskName $name
-  } else {
-    Log "WARNING: scheduled task $name missing — starting uvicorn directly"
+# 3) Restart API — prefer Docker Compose (Redis + API); fall back to host uvicorn.
+$composeFile = Join-Path $Root "docker-compose.yml"
+if ((Test-Path $composeFile) -and (Get-Command docker -ErrorAction SilentlyContinue)) {
+  Log "Rebuilding Docker Compose API (preserves Redis volume)"
+  Push-Location $Root
+  try {
+    docker compose up -d --build --force-recreate api
+    if ($LASTEXITCODE -ne 0) { throw "docker compose up failed code=$LASTEXITCODE" }
+  } finally {
+    Pop-Location
   }
-}
+} else {
+  Log "Docker Compose unavailable — restarting host uvicorn tasks"
+  foreach ($name in @("FinhubkhApi80", "FinhubkhApi8788")) {
+    $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    if ($task) {
+      Log "Restarting $name"
+      Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+      Start-Sleep -Seconds 1
+      Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -like "*uvicorn*app.main*" } |
+        ForEach-Object {
+          Log ("Stop uvicorn pid={0}" -f $_.ProcessId)
+          Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+      Start-ScheduledTask -TaskName $name
+    } else {
+      Log "WARNING: scheduled task $name missing — starting uvicorn directly"
+    }
+  }
 
-Start-Sleep -Seconds 3
-if (-not (Get-NetTCPConnection -LocalPort 80 -State Listen -ErrorAction SilentlyContinue)) {
-  Log "Starting API :80 via venv"
-  Start-Process -FilePath $VenvPy -ArgumentList "-m","uvicorn","app.main:app","--host","0.0.0.0","--port","80" -WorkingDirectory $Root -WindowStyle Hidden
-}
-if (-not (Get-NetTCPConnection -LocalPort 8788 -State Listen -ErrorAction SilentlyContinue)) {
-  Log "Starting API :8788 via venv"
-  Start-Process -FilePath $VenvPy -ArgumentList "-m","uvicorn","app.main:app","--host","0.0.0.0","--port","8788" -WorkingDirectory $Root -WindowStyle Hidden
+  Start-Sleep -Seconds 3
+  if (-not (Get-NetTCPConnection -LocalPort 80 -State Listen -ErrorAction SilentlyContinue)) {
+    Log "Starting API :80 via venv"
+    Start-Process -FilePath $VenvPy -ArgumentList "-m","uvicorn","app.main:app","--host","0.0.0.0","--port","80" -WorkingDirectory $Root -WindowStyle Hidden
+  }
+  if (-not (Get-NetTCPConnection -LocalPort 8788 -State Listen -ErrorAction SilentlyContinue)) {
+    Log "Starting API :8788 via venv"
+    Start-Process -FilePath $VenvPy -ArgumentList "-m","uvicorn","app.main:app","--host","0.0.0.0","--port","8788" -WorkingDirectory $Root -WindowStyle Hidden
+  }
 }
 
 # 4) Restart supervisor/workers only (do NOT kill terminal64)

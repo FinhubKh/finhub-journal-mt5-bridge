@@ -80,10 +80,35 @@ jobs:
           EOF
 
       - name: Upload and deploy
+        env:
+          INVESTOR_CRED_ENCRYPTION_KEY: ${{ secrets.INVESTOR_CRED_ENCRYPTION_KEY }}
         run: |
           ssh bridge 'powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path C:\\finhubkh\\deploy-staging | Out-Null; if (Test-Path C:\\finhubkh\\bridge-deploy.tgz) { Remove-Item C:\\finhubkh\\bridge-deploy.tgz -Force }"'
           scp /tmp/bridge-deploy.tgz bridge:C:/finhubkh/bridge-deploy.tgz
           scp scripts/deploy-remote.ps1 bridge:C:/finhubkh/deploy-remote.ps1
+          # Ensure worker/API .env has the journal encryption key (never printed).
+          if [ -n "${INVESTOR_CRED_ENCRYPTION_KEY:-}" ]; then
+            ssh bridge "powershell -NoProfile -ExecutionPolicy Bypass -Command \"
+              \\\$ErrorActionPreference = 'Stop'
+              \\\$envPath = 'C:\\finhubkh\\finhubkh-mt5-bridge\\.env'
+              if (-not (Test-Path \\\$envPath)) { throw 'Missing bridge .env' }
+              \\\$key = '${INVESTOR_CRED_ENCRYPTION_KEY}'
+              \\\$lines = Get-Content \\\$envPath
+              \\\$out = @()
+              \\\$found = \\\$false
+              foreach (\\\$line in \\\$lines) {
+                if (\\\$line -match '^INVESTOR_CRED_ENCRYPTION_KEY=') {
+                  \\\$out += ('INVESTOR_CRED_ENCRYPTION_KEY=' + \\\$key)
+                  \\\$found = \\\$true
+                } else {
+                  \\\$out += \\\$line
+                }
+              }
+              if (-not \\\$found) { \\\$out += ('INVESTOR_CRED_ENCRYPTION_KEY=' + \\\$key) }
+              Set-Content -Path \\\$envPath -Value \\\$out -Encoding UTF8
+              Write-Host 'INVESTOR_CRED_ENCRYPTION_KEY upserted in .env'
+            \""
+          fi
           ssh bridge 'powershell -NoProfile -ExecutionPolicy Bypass -Command "
             \$ErrorActionPreference = \"Stop\"
             \$staging = \"C:\\finhubkh\\deploy-staging\"
@@ -95,12 +120,12 @@ jobs:
 
       - name: Public health check
         run: |
-          for i in 1 2 3 4 5 6; do
+          for i in 1 2 3 4 5 6 7 8 9 10; do
             # Cloudflare HTTPS to origin is currently broken; journal uses HTTP.
             body=$(curl -fsS --max-time 10 http://bridge.finhubkh.com/health || true)
             echo "try=$i $body"
-            echo "$body" | grep -q '"ok": *true' && exit 0
-            sleep 5
+            echo "$body" | grep -q '"ok": *true' && echo "$body" | grep -q 'workers_alive' && exit 0
+            sleep 6
           done
-          echo "Health check failed"
+          echo "Health check failed (expected new fields like workers_alive)"
           exit 1
