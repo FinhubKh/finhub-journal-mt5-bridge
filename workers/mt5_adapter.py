@@ -47,13 +47,49 @@ class MetaTrader5Adapter:
             import MetaTrader5 as mt5
 
         self._mt5 = mt5
+        self._session_ready = False
+        self._path = ""
+        self._login = None
+        self._password = None
+        self._server = None
+
+    def _same_session(self, path, login, password, server) -> bool:
+        return (
+            self._session_ready
+            and self._path == (path or "").replace("\\", "/")
+            and self._login == int(login)
+            and self._password == password
+            and self._server == server
+        )
 
     def initialize(self, path, login, password, server, timeout_ms=15000) -> bool:
         # Forward slashes + portable mode avoid common IPC timeouts on Windows
         # Server / Hyper-V VPS installs under Program Files.
         normalized = (path or "").replace("\\", "/")
+        login_i = int(login)
+
+        if self._same_session(normalized, login_i, password, server):
+            return True
+
+        # Switch account on a warm terminal when possible.
+        if self._session_ready and hasattr(self._mt5, "login"):
+            try:
+                if bool(self._mt5.login(login_i, password=password, server=server)):
+                    self._path = normalized
+                    self._login = login_i
+                    self._password = password
+                    self._server = server
+                    return True
+            except Exception:
+                pass
+            try:
+                self._mt5.shutdown()
+            except Exception:
+                pass
+            self._session_ready = False
+
         kwargs = {
-            "login": int(login),
+            "login": login_i,
             "password": password,
             "server": server,
             "timeout": timeout_ms,
@@ -61,15 +97,31 @@ class MetaTrader5Adapter:
         }
         if normalized:
             kwargs["path"] = normalized
-        return bool(self._mt5.initialize(**kwargs))
+        ok = bool(self._mt5.initialize(**kwargs))
+        if ok:
+            self._session_ready = True
+            self._path = normalized
+            self._login = login_i
+            self._password = password
+            self._server = server
+        else:
+            self._session_ready = False
+        return ok
 
     def last_error(self):
         return self._mt5.last_error()
 
-    def shutdown(self):
+    def shutdown(self, force: bool = True):
+        if not force:
+            return
+        self._session_ready = False
+        self._login = None
+        self._password = None
+        self._server = None
+        self._path = ""
         self._mt5.shutdown()
 
-    def history_deals(self, date_from, date_to) -> list[dict]:
+    def history_deals(self, date_from, date_to, on_chunk=None) -> list[dict]:
         raw = []
         cursor = date_from
         chunk = timedelta(days=HISTORY_CHUNK_DAYS)
@@ -78,6 +130,11 @@ class MetaTrader5Adapter:
             batch = self._mt5.history_deals_get(cursor, nxt) or []
             raw.extend(batch)
             cursor = nxt
+            if callable(on_chunk):
+                try:
+                    on_chunk()
+                except Exception:
+                    pass
 
         mapped = []
         seen = set()

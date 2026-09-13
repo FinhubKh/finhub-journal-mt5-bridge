@@ -9,7 +9,7 @@ from __future__ import annotations
 import httpx
 
 from workers.crypto_helper import decrypt_secret
-from workers.supabase_client import fetch_investor_credentials
+from workers.supabase_client import fetch_investor_credentials, fetch_trading_account
 
 
 class CredentialsError(Exception):
@@ -25,11 +25,25 @@ def resolve_job_credentials(
     encryption_key: str,
 ) -> dict:
     out = dict(job)
+    trading_account_id = str(out.get("trading_account_id") or "")
+    if trading_account_id and not out.get("platform"):
+        try:
+            account = fetch_trading_account(
+                http,
+                supabase_url=supabase_url,
+                service_key=service_key,
+                trading_account_id=trading_account_id,
+            )
+            if account and account.get("platform"):
+                out["platform"] = str(account.get("platform") or "mt5").lower()
+        except Exception:
+            out.setdefault("platform", "mt5")
+    out.setdefault("platform", "mt5")
+
     has_inline = bool(out.get("password") and out.get("login") and out.get("server"))
     if has_inline:
         return out
 
-    trading_account_id = str(out.get("trading_account_id") or "")
     if not trading_account_id:
         raise CredentialsError("trading_account_id is required")
 

@@ -10,6 +10,15 @@ else
 end
 """
 
+# Refresh TTL only if we still own the lock.
+_REFRESH_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('expire', KEYS[1], ARGV[2])
+else
+  return 0
+end
+"""
+
 
 def lock_held(redis_client, key: str) -> bool:
     return bool(redis_client.get(key))
@@ -40,6 +49,31 @@ class RedisLock:
             if self.client.set(self.key, self.token, nx=True, ex=self.ttl_seconds):
                 return True
             time.sleep(self.poll_seconds)
+        return False
+
+    def refresh(self) -> bool:
+        """Extend lock TTL during long terminal I/O (history pulls)."""
+        try:
+            if hasattr(self.client, "eval"):
+                return bool(
+                    self.client.eval(
+                        _REFRESH_LUA,
+                        1,
+                        self.key,
+                        self.token,
+                        int(self.ttl_seconds),
+                    )
+                )
+            if self.client.get(self.key) == self.token:
+                expire = getattr(self.client, "expire", None)
+                if callable(expire):
+                    expire(self.key, int(self.ttl_seconds))
+                    return True
+                # Fake / minimal redis: rewrite with same token + TTL.
+                self.client.set(self.key, self.token, ex=self.ttl_seconds)
+                return True
+        except Exception:
+            return False
         return False
 
     def release(self) -> None:

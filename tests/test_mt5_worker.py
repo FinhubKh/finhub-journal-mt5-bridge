@@ -23,12 +23,15 @@ class FakeMt5:
     def last_error(self):
         return self.error or (1, "Success")
 
-    def shutdown(self):
-        self.initialized = False
+    def shutdown(self, force=True):
+        if force:
+            self.initialized = False
 
-    def history_deals(self, date_from, date_to):
+    def history_deals(self, date_from, date_to, on_chunk=None):
         self.seen_date_from = date_from
         self.seen_date_to = date_to
+        if callable(on_chunk):
+            on_chunk()
         return list(self.deals)
 
 
@@ -55,10 +58,13 @@ class FakeLockRedis:
     def eval(self, script, numkeys, *args):
         key = args[0]
         token = args[1]
-        if self.kv.get(key) == token:
-            self.kv.pop(key, None)
+        if self.kv.get(key) != token:
+            return 0
+        # Refresh TTL vs release — detect by script body.
+        if "expire" in str(script).lower():
             return 1
-        return 0
+        self.kv.pop(key, None)
+        return 1
 
 
 def _supabase_transport(on_trades=None, *, last_synced_at=None, cashflow_count=0, on_cashflows=None):
@@ -270,12 +276,14 @@ def test_worker_backfills_cashflows_for_existing_investor_account():
         lock_wait_seconds=1,
     )
     assert result["ok"] is True
-    assert (before - mt5.seen_date_from).days >= 3600
+    # Capped first/cashflow backfill window (not a full 10-year walk under lock).
+    days = (before - mt5.seen_date_from).days
+    assert 300 <= days <= 400
     assert seen["payload"][0]["op_type"] == "deposit"
     assert seen["payload"][0]["amount"] == 5000
 
 
-def test_worker_uses_full_lookback_on_first_sync():
+def test_worker_uses_capped_lookback_on_first_sync():
     client = httpx.Client(transport=_supabase_transport())
     mt5 = FakeMt5()
     from datetime import datetime, timezone
@@ -292,8 +300,9 @@ def test_worker_uses_full_lookback_on_first_sync():
         redis_client=FakeLockRedis(),
         lock_wait_seconds=1,
     )
-    # No last_synced_at and no cashflows yet -> walk ~10 years for deposit history.
-    assert (before - mt5.seen_date_from).days >= 3600
+    # No last_synced_at and no cashflows yet -> capped backfill (default 365d).
+    days = (before - mt5.seen_date_from).days
+    assert 300 <= days <= 400
 
 
 def test_worker_backfills_cashflows_even_after_prior_trade_sync():
@@ -320,8 +329,9 @@ def test_worker_backfills_cashflows_even_after_prior_trade_sync():
         lock_wait_seconds=1,
     )
     # Existing investor accounts already have last_synced_at from trade-only
-    # syncs, so we still walk ~10 years until at least one cashflow is stored.
-    assert (before - mt5.seen_date_from).days >= 3600
+    # syncs, so we still backfill until at least one cashflow is stored — capped.
+    days = (before - mt5.seen_date_from).days
+    assert 300 <= days <= 400
 
 
 def test_worker_uses_incremental_window_after_prior_sync():
@@ -540,6 +550,80 @@ def test_verify_job_success_writes_result():
         "ok": True,
         "trading_account_id": "a1",
     }
+
+
+def test_verify_keep_alive_leaves_terminal_initialized():
+    redis_client = FakeResultRedis()
+    mt5 = FakeMt5()
+    result = run_verify_job(
+        job={
+            "job_id": "verify-keep",
+            "job_type": "verify",
+            "trading_account_id": "a1",
+            "login": "1",
+            "password": "p",
+            "server": "S",
+        },
+        mt5=mt5,
+        redis_client=redis_client,
+        terminal_path="C:/mt5/terminal64.exe",
+        queue_key="q",
+        lock_key="lock",
+        lock_wait_seconds=1,
+        keep_alive=True,
+    )
+    assert result == {"ok": True}
+    assert mt5.initialized is True
+
+
+def test_sync_keep_alive_leaves_terminal_initialized():
+    client = httpx.Client(transport=_supabase_transport(cashflow_count=1, last_synced_at="2026-01-01T00:00:00Z"))
+    mt5 = FakeMt5(
+        deals=[
+            {
+                "ticket": 1,
+                "order": 10,
+                "position_id": 1,
+                "entry": "in",
+                "type": "buy",
+                "symbol": "EURUSD",
+                "price": 1.1,
+                "volume": 0.1,
+                "profit": 0,
+                "swap": 0,
+                "commission": 0,
+                "time": "2026-01-01T10:00:00Z",
+            },
+            {
+                "ticket": 2,
+                "order": 11,
+                "position_id": 1,
+                "entry": "out",
+                "type": "sell",
+                "symbol": "EURUSD",
+                "price": 1.2,
+                "volume": 0.1,
+                "profit": 10,
+                "swap": 0,
+                "commission": 0,
+                "time": "2026-01-01T11:00:00Z",
+            },
+        ]
+    )
+    result = run_sync_job(
+        job={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
+        mt5=mt5,
+        http=client,
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
+        terminal_path="C:/mt5/terminal64.exe",
+        lookback_days=90,
+        redis_client=FakeLockRedis(),
+        lock_wait_seconds=1,
+        keep_alive=True,
+    )
+    assert result["ok"] is True
+    assert mt5.initialized is True
 
 
 def test_verify_job_fail_writes_generic_error():

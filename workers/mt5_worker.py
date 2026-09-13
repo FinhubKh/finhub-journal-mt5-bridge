@@ -15,13 +15,14 @@ from workers.supabase_client import (
 )
 from workers.trade_map import deals_to_cashflows, deals_to_trades
 
-LOGIN_FAILED_MSG = "Login failed — check broker server, MT5 login, and investor password"
+LOGIN_FAILED_MSG = "Login failed — check broker server, MetaTrader login, and investor password"
 
 # Re-pull a little before the last successful sync in case a deal settled
 # late or a prior sync was cut short, without re-walking the full history.
 INCREMENTAL_SYNC_OVERLAP_HOURS = 24
-# First cashflow pull for an account walks ~10 years, matching the EA full-history sync.
-CASHFLOW_BACKFILL_DAYS = 3650
+# Cap first / cashflow backfill so one account cannot hold the terminal lock
+# for a multi-year walk. Older history can be filled by a later sync job.
+CASHFLOW_BACKFILL_DAYS = 365
 
 
 NO_TRADES_EVER_MSG = "No trade history found — this account hasn't placed any trades yet"
@@ -86,6 +87,20 @@ def _mt5_error_detail(mt5) -> str:
     return f" ({desc})"
 
 
+def _shutdown_terminal(mt5, *, keep_alive: bool) -> None:
+    try:
+        shutdown = getattr(mt5, "shutdown", None)
+        if not callable(shutdown):
+            return
+        try:
+            shutdown(force=not keep_alive)
+        except TypeError:
+            if not keep_alive:
+                shutdown()
+    except Exception:
+        pass
+
+
 def _verify_result(job, *, ok: bool, error: str | None = None) -> dict:
     payload = {
         "status": "done",
@@ -108,6 +123,7 @@ def run_verify_job(
     lock_ttl_seconds: int = 300,
     lock_wait_seconds: int = 120,
     init_timeout_ms: int = 15000,
+    keep_alive: bool = False,
 ) -> dict:
     job_id = job["job_id"]
     lock = None
@@ -144,10 +160,7 @@ def run_verify_job(
             )
             error_detail = "" if login_ok else _mt5_error_detail(mt5)
         finally:
-            try:
-                mt5.shutdown()
-            except Exception:
-                pass
+            _shutdown_terminal(mt5, keep_alive=keep_alive and login_ok)
             lock.release()
             lock = None
 
@@ -213,6 +226,7 @@ def run_sync_job(
     lock_ttl_seconds: int = 600,
     lock_wait_seconds: int = 120,
     init_timeout_ms: int = 15000,
+    keep_alive: bool = False,
 ) -> dict:
     trading_account_id = job["trading_account_id"]
     job_id = job.get("job_id")
@@ -220,6 +234,7 @@ def run_sync_job(
     deals = None
     login_ok = False
     sync_kind = "unknown"
+    error_detail = ""
 
     def _store(result: dict) -> dict:
         if redis_client is not None and job_id:
@@ -230,6 +245,26 @@ def run_sync_job(
         return result
 
     try:
+        # Resolve sync window + stage updates outside the terminal lock so
+        # HTTP/Supabase latency does not block other jobs.
+        try:
+            set_sync_stage(
+                http,
+                supabase_url=supabase_url,
+                service_key=service_key,
+                trading_account_id=trading_account_id,
+                stage="connecting",
+            )
+        except Exception:
+            pass
+        date_from, date_to, sync_kind = _resolve_sync_window(
+            http,
+            supabase_url=supabase_url,
+            service_key=service_key,
+            trading_account_id=trading_account_id,
+            lookback_days=lookback_days,
+        )
+
         if redis_client is not None:
             lock = RedisLock(
                 redis_client,
@@ -240,19 +275,9 @@ def run_sync_job(
             if not lock.acquire():
                 return _store(_sync_result(job, ok=False, error="mt5_lock_timeout"))
 
-        # Hold the lock only for MT5 terminal I/O so another worker can write to DB
+        # Hold the lock only for terminal I/O so another worker can write to DB
         # while this process completes HTTP upserts.
         try:
-            try:
-                set_sync_stage(
-                    http,
-                    supabase_url=supabase_url,
-                    service_key=service_key,
-                    trading_account_id=trading_account_id,
-                    stage="connecting",
-                )
-            except Exception:
-                pass
             login_ok = bool(
                 mt5.initialize(
                     terminal_path,
@@ -274,19 +299,12 @@ def run_sync_job(
                     )
                 except Exception:
                     pass
-                date_from, date_to, sync_kind = _resolve_sync_window(
-                    http,
-                    supabase_url=supabase_url,
-                    service_key=service_key,
-                    trading_account_id=trading_account_id,
-                    lookback_days=lookback_days,
-                )
-                deals = mt5.history_deals(date_from, date_to)
+                if lock is not None:
+                    lock.refresh()
+                on_chunk = lock.refresh if lock is not None else None
+                deals = mt5.history_deals(date_from, date_to, on_chunk=on_chunk)
         finally:
-            try:
-                mt5.shutdown()
-            except Exception:
-                pass
+            _shutdown_terminal(mt5, keep_alive=keep_alive and login_ok)
             if lock is not None:
                 lock.release()
                 lock = None

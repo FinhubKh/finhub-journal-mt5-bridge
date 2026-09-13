@@ -28,10 +28,15 @@ class Settings(BaseSettings):
     mt5_terminal_path: str = ""
     # Optional JSON map (server prefix → terminal64.exe). See config/mt5_terminal_map.json.
     mt5_terminal_map_path: str = ""
+    # Portable MetaTrader 4 terminal.exe used for investor-password sync.
+    mt4_terminal_path: str = ""
+    # Optional JSON map (server prefix → terminal.exe). See config/mt4_terminal_map.json.
+    mt4_terminal_map_path: str = ""
     # Bound how long a single login attempt can hold the MT5 lock. MT5's own
     # default is 60s, which lets one bad/unreachable broker starve every other
     # queued verify/sync job behind the lock.
     mt5_init_timeout_ms: int = 15000
+    mt4_init_timeout_ms: int = 45000
     # Default 2: one worker can write DB while another holds the MT5 lock
     worker_pool_size: int = 2
     history_lookback_days: int = 90
@@ -40,6 +45,9 @@ class Settings(BaseSettings):
     mt5_lock_key: str = "finhubkh:mt5:terminal_lock"
     mt5_lock_ttl_seconds: int = 600
     mt5_lock_wait_seconds: int = 120
+    mt4_lock_key: str = "finhubkh:mt4:terminal_lock"
+    mt4_lock_ttl_seconds: int = 900
+    mt4_lock_wait_seconds: int = 180
     worker_heartbeat_key: str = "finhubkh:mt5:worker_heartbeat"
     worker_heartbeat_ttl_seconds: int = 60
     processing_stale_seconds: int = 600

@@ -116,7 +116,7 @@ def fetch_trading_account(
 ) -> dict | None:
     url = (
         f"{supabase_url.rstrip('/')}/rest/v1/trading_accounts"
-        f"?select=id,user_id,name,pnl_denomination"
+        f"?select=id,user_id,name,pnl_denomination,platform"
         f"&id=eq.{trading_account_id}&limit=1"
     )
     res = client.get(url, headers=supabase_headers(service_key), timeout=30.0)
