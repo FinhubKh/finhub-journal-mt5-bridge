@@ -20,6 +20,22 @@ REQUEST_NAME = "finhub_bridge_request.json"
 RESPONSE_NAME = "finhub_bridge_response.json"
 
 
+class _ExternalProc:
+    """Placeholder for a terminal started outside this process (schtasks)."""
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        return None
+
+
 def _utc_ts(value) -> int:
     if isinstance(value, datetime):
         if value.tzinfo is None:
@@ -116,16 +132,18 @@ class MetaTrader4Adapter:
             self._last_error = (-1, f"Cannot create MT4 Files dir ({exc})")
             return False
 
+        # Prefer a warm terminal already logged into this account (common on the
+        # interactive VPS session). Force-restart only when verify fails.
+        if self._terminal_process_running():
+            payload = self._verify_via_ipc(timeout_ms=min(20000, self._timeout_ms))
+            if payload and self._verify_payload_ok(payload):
+                self._process = self._process or _ExternalProc()
+                self._session_ready = True
+                return True
+
         self._clear_ipc()
         try:
-            self._write_request(
-                {
-                    "action": "verify",
-                    "login": self._login,
-                    "server": self._server,
-                    "request_id": f"verify-{int(time.time())}",
-                }
-            )
+            self._write_request(self._verify_payload())
         except OSError as exc:
             self._last_error = (-1, f"Cannot write MT4 request ({exc})")
             return False
@@ -135,18 +153,7 @@ class MetaTrader4Adapter:
             return False
 
         payload = self._wait_response(timeout_ms=self._timeout_ms)
-        if not payload:
-            self._last_error = (-1, "MT4 companion EA did not respond (is the EA attached?)")
-            return False
-        if not payload.get("ok"):
-            self._last_error = (-1, str(payload.get("error") or "Login failed"))
-            return False
-        connected_login = int(payload.get("login") or 0)
-        if connected_login and connected_login != self._login:
-            self._last_error = (
-                -1,
-                f"MT4 logged into {connected_login}, expected {self._login}",
-            )
+        if not self._verify_payload_ok(payload):
             return False
         self._session_ready = True
         return True
@@ -216,6 +223,55 @@ class MetaTrader4Adapter:
                 pass
         self._kill_stale_terminals()
 
+    def _verify_payload(self) -> dict:
+        return {
+            "action": "verify",
+            "login": self._login,
+            "server": self._server,
+            "request_id": f"verify-{int(time.time())}",
+        }
+
+    def _verify_via_ipc(self, *, timeout_ms: int) -> dict | None:
+        self._clear_ipc()
+        try:
+            self._write_request(self._verify_payload())
+        except OSError as exc:
+            self._last_error = (-1, f"Cannot write MT4 request ({exc})")
+            return None
+        return self._wait_response(timeout_ms=timeout_ms)
+
+    def _verify_payload_ok(self, payload: dict | None) -> bool:
+        if not payload:
+            self._last_error = (-1, "MT4 companion EA did not respond (is the EA attached?)")
+            return False
+        if not payload.get("ok"):
+            self._last_error = (-1, str(payload.get("error") or "Login failed"))
+            return False
+        connected_login = int(payload.get("login") or 0)
+        if connected_login and connected_login != self._login:
+            self._last_error = (
+                -1,
+                f"MT4 logged into {connected_login}, expected {self._login}",
+            )
+            return False
+        return True
+
+    def _terminal_process_running(self) -> bool:
+        if self._process is not None and self._process.poll() is None:
+            return True
+        if os.name != "nt":
+            return False
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq terminal.exe", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return "terminal.exe" in (out.stdout or "").lower()
+        except Exception:
+            return False
+
     def _kill_stale_terminals(self) -> None:
         """Ensure only one portable MT4 is running for this path."""
         if os.name != "nt":
@@ -230,6 +286,91 @@ class MetaTrader4Adapter:
         except Exception:
             pass
 
+    def _write_login_ini(self) -> str:
+        """Write portable login.ini; return absolute path."""
+        cfg_dir = Path(self._terminal_path).resolve().parent / "config"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        # Use write_bytes: Path.write_text on Windows expands \n -> \r\n and would
+        # turn an explicit \r\n join into broken \r\r\n lines MT4 cannot parse.
+        login_ini = (
+            "[Common]\n"
+            f"Login={self._login}\n"
+            f"Password={self._password}\n"
+            f"Server={self._server}\n"
+            "KeepPrivate=1\n"
+            "NewsEnable=0\n"
+        )
+        path = cfg_dir / "login.ini"
+        path.write_bytes(login_ini.replace("\n", "\r\n").encode("ascii"))
+        return str(path)
+
+    def _launch_terminal_interactive(self, args: list[str], cwd: str) -> bool:
+        """Start MT4 in the logged-on console session (required for broker login).
+
+        Workers may run in session 0; Popen from there leaves MT4 unable to
+        authenticate. schtasks /IT launches into the interactive desktop.
+        """
+        task = "FinhubkhMt4LoginLaunch"
+        # Tiny .bat: `start "title" exe args` so /portable is not eaten by start.exe.
+        bat = Path(self._terminal_path).resolve().parent / "_finhub_mt4_launch.bat"
+        exe = args[0]
+        rest = " ".join(f'"{a}"' for a in args[1:])
+        bat.write_text(
+            "@echo off\r\n"
+            f'cd /d "{cwd}"\r\n'
+            f'start "mt4" "{exe}" {rest}\r\n',
+            encoding="ascii",
+        )
+        subprocess.run(["schtasks", "/Delete", "/TN", task, "/F"], capture_output=True)
+        create = subprocess.run(
+            [
+                "schtasks",
+                "/Create",
+                "/TN",
+                task,
+                "/TR",
+                str(bat),
+                "/SC",
+                "ONCE",
+                "/ST",
+                "23:59",
+                "/RL",
+                "HIGHEST",
+                "/F",
+                "/IT",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if create.returncode != 0:
+            self._last_error = (
+                -1,
+                f"Failed to schedule interactive MT4 launch ({create.stderr or create.stdout})",
+            )
+            return False
+        run = subprocess.run(
+            ["schtasks", "/Run", "/TN", task],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if run.returncode != 0:
+            self._last_error = (
+                -1,
+                f"Failed to run interactive MT4 launch ({run.stderr or run.stdout})",
+            )
+            return False
+        # Wait until terminal.exe appears (or timeout).
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if self._terminal_process_running():
+                time.sleep(2)
+                return True
+            time.sleep(0.5)
+        self._last_error = (-1, "MT4 interactive launch did not start terminal.exe")
+        return False
+
     def _ensure_terminal_running(self, *, force_restart: bool = False) -> bool:
         if (
             not force_restart
@@ -237,31 +378,21 @@ class MetaTrader4Adapter:
             and self._process.poll() is None
         ):
             return True
+        if not force_restart and self._terminal_process_running():
+            return True
         if not self._terminal_path:
             self._last_error = (-1, "MT4 terminal path missing")
             return False
         # Fresh login — kill leftover MT4 first.
         self._kill_stale_terminals()
-        # Write login.ini so MT4 has credentials even if /login args are ignored.
-        # Use write_bytes: Path.write_text on Windows expands \n -> \r\n and would
-        # turn an explicit \r\n join into broken \r\r\n lines MT4 cannot parse.
         try:
-            cfg_dir = Path(self._terminal_path).resolve().parent / "config"
-            cfg_dir.mkdir(parents=True, exist_ok=True)
-            login_ini = (
-                "[Common]\n"
-                f"Login={self._login}\n"
-                f"Password={self._password}\n"
-                f"Server={self._server}\n"
-                "KeepPrivate=1\n"
-                "NewsEnable=0\n"
-            )
-            (cfg_dir / "login.ini").write_bytes(login_ini.replace("\n", "\r\n").encode("ascii"))
-        except OSError:
-            pass
+            config_path = self._write_login_ini()
+        except OSError as exc:
+            self._last_error = (-1, f"Cannot write MT4 login.ini ({exc})")
+            return False
 
-        config_path = str(Path(self._terminal_path).resolve().parent / "config" / "login.ini")
-        # Pass login on CLI too (list argv, so '@' in password is safe).
+        # Include /login /password /server. Popen/list argv keeps '@' intact;
+        # login.ini alone is not always applied on headless relaunches.
         args = [
             self._terminal_path,
             "/portable",
@@ -270,10 +401,47 @@ class MetaTrader4Adapter:
             f"/password:{self._password}",
             f"/server:{self._server}",
         ]
+        cwd = str(Path(self._terminal_path).parent)
+
+        # Unit tests inject start_process — keep that path.
+        if self._start_process is not subprocess.Popen:
+            try:
+                self._process = self._start_process(
+                    args,
+                    cwd=cwd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError as exc:
+                self._last_error = (-1, f"Failed to start MT4 ({exc})")
+                self._process = None
+                return False
+            return True
+
+        if os.name == "nt":
+            if self._launch_terminal_interactive(args, cwd):
+                # Track an external process handle so warm-session reuse works.
+                self._process = _ExternalProc()
+                return True
+            # Fall back to direct Popen (may still work in interactive workers).
+            try:
+                self._process = subprocess.Popen(
+                    args,
+                    cwd=cwd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError as exc:
+                self._last_error = (-1, f"Failed to start MT4 ({exc})")
+                self._process = None
+                return False
+            time.sleep(3)
+            return True
+
         try:
             self._process = self._start_process(
                 args,
-                cwd=str(Path(self._terminal_path).parent),
+                cwd=cwd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -281,10 +449,6 @@ class MetaTrader4Adapter:
             self._last_error = (-1, f"Failed to start MT4 ({exc})")
             self._process = None
             return False
-        # Real Windows terminals need a moment for process start; OnInit itself
-        # waits for broker connection, so keep this short.
-        if os.name == "nt" and self._start_process is subprocess.Popen:
-            time.sleep(3)
         return True
 
     def _write_request(self, payload: dict) -> None:

@@ -1,0 +1,81 @@
+name: Debug Bridge Queue
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH
+        env:
+          BRIDGE_SSH_KEY: ${{ secrets.BRIDGE_SSH_KEY }}
+          BRIDGE_SSH_HOST: ${{ secrets.BRIDGE_SSH_HOST }}
+          BRIDGE_SSH_USER: ${{ secrets.BRIDGE_SSH_USER }}
+          BRIDGE_SSH_PORT: ${{ secrets.BRIDGE_SSH_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$BRIDGE_SSH_KEY" > ~/.ssh/bridge_deploy
+          chmod 600 ~/.ssh/bridge_deploy
+          PORT="${BRIDGE_SSH_PORT:-22}"
+          ssh-keyscan -p "$PORT" -H "$BRIDGE_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          cat > ~/.ssh/config <<EOF
+          Host bridge
+            HostName ${BRIDGE_SSH_HOST}
+            User ${BRIDGE_SSH_USER}
+            Port ${PORT}
+            IdentityFile ~/.ssh/bridge_deploy
+            StrictHostKeyChecking accept-new
+          EOF
+
+      - name: Inspect Redis + workers
+        run: |
+          cat > /tmp/bridge_inspect.ps1 <<'PSEOF'
+          $ErrorActionPreference = "Continue"
+          Write-Host "=== worker/uvicorn processes ==="
+          Get-CimInstance Win32_Process | Where-Object {
+            $_.CommandLine -and (
+              $_.CommandLine -like "*workers.supervisor*" -or
+              $_.CommandLine -like "*workers.run_worker*" -or
+              $_.CommandLine -like "*uvicorn*app.main*"
+            )
+          } | ForEach-Object {
+            $cmd = $_.CommandLine
+            if ($cmd.Length -gt 160) { $cmd = $cmd.Substring(0, 160) }
+            Write-Host ("pid={0} {1}" -f $_.ProcessId, $cmd)
+          }
+
+          Write-Host "=== redis inspect ==="
+          $py = "C:\finhubkh\finhubkh-mt5-bridge\.venv\Scripts\python.exe"
+          $code = @'
+          import redis
+          from pathlib import Path
+          env = {}
+          for line in Path(r"C:\finhubkh\finhubkh-mt5-bridge\.env").read_text(encoding="utf-8", errors="ignore").splitlines():
+              line = line.strip()
+              if not line or line.startswith("#") or "=" not in line:
+                  continue
+              k, v = line.split("=", 1)
+              env[k.strip()] = v.strip().strip('"').strip("'")
+          r = redis.from_url(env.get("REDIS_URL", "redis://127.0.0.1:6379/0"), decode_responses=True)
+          q = env.get("REDIS_QUEUE_KEY", "finhubkh:mt5:sync_jobs")
+          print("REDIS_URL", env.get("REDIS_URL"))
+          print("queue", q)
+          print("llen", r.llen(q))
+          print("pending", r.scard(q + ":pending"))
+          print("processing", r.llen(q + ":processing"))
+          print("list", r.lrange(q, 0, -1))
+          print("pending_members", list(r.smembers(q + ":pending")))
+          print("latest", r.hgetall(q + ":latest"))
+          print("heartbeat", r.get(env.get("WORKER_HEARTBEAT_KEY", "finhubkh:mt5:worker_heartbeat")))
+          print("lock", r.get(env.get("MT5_LOCK_KEY", "finhubkh:mt5:terminal_lock")))
+          print("enc_key_len", len(env.get("INVESTOR_CRED_ENCRYPTION_KEY", "") or ""))
+          '@
+          & $py -c $code
+          PSEOF
+
+          # Drop the leading indentation added by this YAML block
+          sed -i 's/^          //' /tmp/bridge_inspect.ps1
+          scp /tmp/bridge_inspect.ps1 bridge:C:/finhubkh/bridge_inspect.ps1
+          ssh bridge 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\finhubkh\bridge_inspect.ps1'
+          ssh bridge 'del C:\finhubkh\bridge_inspect.ps1' || true

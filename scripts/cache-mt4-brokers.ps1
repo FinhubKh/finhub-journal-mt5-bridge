@@ -206,9 +206,11 @@ $PrefixCatalog = [ordered]@{
   metaquotes  = @("MetaQuotes")
 }
 $prefixes = [ordered]@{}
-$eaSrc = "C:\finhubkh\mt4-portable\MQL4\Indicators\FinhubJournal_BridgeExport.ex4"
-$eaSrcMq4 = "C:\finhubkh\mt4-portable\MQL4\Indicators\FinhubJournal_BridgeExport.mq4"
+$eaSrc = "C:\finhubkh\mt4-portable\MQL4\Experts\FinhubJournal_BridgeExport.ex4"
+$eaSrcMq4 = "C:\finhubkh\mt4-portable\MQL4\Experts\FinhubJournal_BridgeExport.mq4"
+$commonSrc = "C:\finhubkh\mt4-portable\config\common.ini"
 $profileSrc = "C:\finhubkh\mt4-portable\profiles"
+$srvSrcDir = "C:\finhubkh\mt4-portable\config"
 
 foreach ($id in $PrefixCatalog.Keys) {
   $term = Join-Path $BrokersRoot "$id\terminal.exe"
@@ -216,10 +218,20 @@ foreach ($id in $PrefixCatalog.Keys) {
   $root = Join-Path $BrokersRoot $id
   # Force portable data folder next to terminal.exe (Files IPC path).
   Set-Content -Path (Join-Path $root "portable.ini") -Value "1" -Encoding ASCII
-  $indDir = Join-Path $root "MQL4\Indicators"
-  New-Item -ItemType Directory -Force -Path $indDir,(Join-Path $root "MQL4\Files") | Out-Null
-  if (Test-Path $eaSrc) { Copy-Item $eaSrc $indDir -Force }
-  if (Test-Path $eaSrcMq4) { Copy-Item $eaSrcMq4 $indDir -Force }
+  $expertsDir = Join-Path $root "MQL4\Experts"
+  $cfgDir = Join-Path $root "config"
+  New-Item -ItemType Directory -Force -Path $expertsDir,(Join-Path $root "MQL4\Files"),$cfgDir | Out-Null
+  if (Test-Path $eaSrc) { Copy-Item $eaSrc $expertsDir -Force }
+  if (Test-Path $eaSrcMq4) { Copy-Item $eaSrcMq4 $expertsDir -Force }
+  if (Test-Path $commonSrc) { Copy-Item $commonSrc $cfgDir -Force }
+  # Seed known .srv files so login can resolve without a UI scan.
+  if (Test-Path $srvSrcDir) {
+    Get-ChildItem $srvSrcDir -Filter "*.srv" -ErrorAction SilentlyContinue | ForEach-Object {
+      Copy-Item $_.FullName $cfgDir -Force -ErrorAction SilentlyContinue
+    }
+  }
+  # Drop mqlcache so newly copied Experts are discovered.
+  Remove-Item (Join-Path $expertsDir "mqlcache.dat") -Force -ErrorAction SilentlyContinue
   if (Test-Path $profileSrc) {
     $profDest = Join-Path $root "profiles"
     New-Item -ItemType Directory -Force -Path $profDest | Out-Null
