@@ -248,7 +248,14 @@ class MetaTrader4Adapter:
             self._last_error = (-1, str(payload.get("error") or "Login failed"))
             return False
         connected_login = int(payload.get("login") or 0)
-        if connected_login and connected_login != self._login:
+        # Require a real account number — ok:true with login 0 is not authenticated.
+        if connected_login <= 0:
+            self._last_error = (
+                -1,
+                f"MT4 not connected to {self._server} (check server name / investor password)",
+            )
+            return False
+        if connected_login != self._login:
             self._last_error = (
                 -1,
                 f"MT4 logged into {connected_login}, expected {self._login}",
@@ -261,16 +268,46 @@ class MetaTrader4Adapter:
             return True
         if os.name != "nt":
             return False
+        # Prefer matching the specific terminal path — any terminal.exe would
+        # falsely treat a different broker install as a warm session.
+        target = str(Path(self._terminal_path).resolve()) if self._terminal_path else ""
         try:
             out = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq terminal.exe", "/FO", "CSV", "/NH"],
+                [
+                    "wmic",
+                    "process",
+                    "where",
+                    "name='terminal.exe'",
+                    "get",
+                    "ExecutablePath",
+                    "/FORMAT:LIST",
+                ],
                 capture_output=True,
                 text=True,
                 check=False,
             )
-            return "terminal.exe" in (out.stdout or "").lower()
+            paths = []
+            for line in (out.stdout or "").splitlines():
+                if line.lower().startswith("executablepath="):
+                    paths.append(line.split("=", 1)[1].strip())
+            if target:
+                target_norm = target.replace("/", "\\").lower()
+                for p in paths:
+                    if p.replace("/", "\\").lower() == target_norm:
+                        return True
+                return False
+            return bool(paths)
         except Exception:
-            return False
+            try:
+                out = subprocess.run(
+                    ["tasklist", "/FI", "IMAGENAME eq terminal.exe", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                return "terminal.exe" in (out.stdout or "").lower()
+            except Exception:
+                return False
 
     def _kill_stale_terminals(self) -> None:
         """Ensure only one portable MT4 is running for this path."""
@@ -391,16 +428,19 @@ class MetaTrader4Adapter:
             self._last_error = (-1, f"Cannot write MT4 login.ini ({exc})")
             return False
 
-        # Include /login /password /server. Popen/list argv keeps '@' intact;
-        # login.ini alone is not always applied on headless relaunches.
+        # Prefer credentials via login.ini. Command-line /password: breaks for
+        # passwords containing '@' (and similar) when launched through `start`
+        # / schtasks .bat quoting on Windows.
         args = [
             self._terminal_path,
             "/portable",
             f"/config:{config_path}",
             f"/login:{self._login}",
-            f"/password:{self._password}",
             f"/server:{self._server}",
         ]
+        # Only append /password when it is plain [A-Za-z0-9] — otherwise login.ini alone.
+        if self._password and all(ch.isalnum() for ch in self._password):
+            args.insert(-1, f"/password:{self._password}")
         cwd = str(Path(self._terminal_path).parent)
 
         # Unit tests inject start_process — keep that path.

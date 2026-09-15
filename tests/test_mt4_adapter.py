@@ -132,3 +132,39 @@ def test_history_reuses_running_terminal_without_restart(tmp_path: Path):
     assert adapter.initialize(str(terminal), 99, "pw", "Srv", timeout_ms=2000)
     assert starts["n"] == 1
     adapter.shutdown(force=True)
+
+
+def test_initialize_rejects_ok_with_zero_login(tmp_path: Path):
+    terminal = tmp_path / "terminal.exe"
+    terminal.write_text("fake", encoding="utf-8")
+    files = tmp_path / "MQL4" / "Files"
+    files.mkdir(parents=True)
+
+    def loop():
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            req = files / "finhub_bridge_request.json"
+            if req.is_file():
+                try:
+                    req.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                (files / "finhub_bridge_response.json").write_text(
+                    json.dumps({"ok": True, "login": 0, "server": "Demo"}),
+                    encoding="utf-8",
+                )
+                return
+            time.sleep(0.01)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+    adapter = MetaTrader4Adapter(
+        poll_interval_seconds=0.01,
+        start_process=lambda *a, **k: _FakeProc(),
+    )
+    ok = adapter.initialize(str(terminal), 12345, "secret", "Demo", timeout_ms=2000)
+    assert ok is False
+    code, desc = adapter.last_error()
+    assert code == -1
+    assert "not connected" in desc.lower()
+    adapter.shutdown(force=True)

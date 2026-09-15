@@ -42,6 +42,7 @@ def resolve_job_credentials(
 
     has_inline = bool(out.get("password") and out.get("login") and out.get("server"))
     if has_inline:
+        out["server"] = normalize_broker_server(str(out["server"]))
         return out
 
     if not trading_account_id:
@@ -69,4 +70,18 @@ def resolve_job_credentials(
     out["password"] = password
     if not out["login"] or not out["server"] or not out["password"]:
         raise CredentialsError("Stored investor credentials are incomplete")
+    out["server"] = normalize_broker_server(str(out["server"]))
     return out
+
+
+# MT4 matches .srv server strings case-sensitively. Map known UI aliases.
+_SERVER_ALIASES = {
+    "blackwellglobal2-live3": "BlackwellGlobal2-Live3",
+}
+
+
+def normalize_broker_server(server: str) -> str:
+    raw = (server or "").strip()
+    if not raw:
+        return raw
+    return _SERVER_ALIASES.get(raw.casefold()) or raw

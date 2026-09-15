@@ -4,15 +4,20 @@
 //| Uses an indicator (not EA) so AutoTrading button is not required |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.03"
+#property version   "1.04"
 #property indicator_chart_window
 #property indicator_buffers 0
 
 input int PollEverySeconds = 2;
+// How long to wait for broker login before answering "not connected".
+input int ConnectWaitSeconds = 120;
 
 const string RequestFile  = "finhub_bridge_request.json";
 const string ResponseFile = "finhub_bridge_response.json";
 const string AliveFile    = "finhub_bridge_alive.txt";
+
+uint g_pendingSinceMs = 0;
+string g_pendingRequestId = "";
 
 //+------------------------------------------------------------------+
 string JsonEscape(string s)
@@ -163,28 +168,59 @@ string BuildHistoryDeals(datetime fromTs, datetime toTs)
 //+------------------------------------------------------------------+
 void HandleRequest()
   {
-   if(!FileIsExist(RequestFile)) return;
+   if(!FileIsExist(RequestFile))
+     {
+      g_pendingSinceMs = 0;
+      g_pendingRequestId = "";
+      return;
+     }
    string raw = ReadWholeFile(RequestFile);
    if(StringLen(raw) < 8) return;
 
    string action = JsonGetString(raw, "action");
    long expectedLogin = JsonGetLong(raw, "login");
    string requestId = JsonGetString(raw, "request_id");
+   string serverWanted = JsonGetString(raw, "server");
    Print("FinhubBridge req ", action, " exp=", expectedLogin,
          " conn=", IsConnected(), " acct=", AccountNumber());
 
-   if(!IsConnected())
+   // Indicators cannot Sleep(). Track wait time with GetTickCount instead.
+   if(g_pendingRequestId != requestId || g_pendingSinceMs == 0)
      {
-      Print("FinhubBridge waiting for connection");
+      g_pendingRequestId = requestId;
+      g_pendingSinceMs = GetTickCount();
+     }
+
+   if(!IsConnected() || AccountNumber() <= 0)
+     {
+      uint waited = GetTickCount() - g_pendingSinceMs;
+      if(waited < (uint)MathMax(5, ConnectWaitSeconds) * 1000)
+        {
+         Print("FinhubBridge waiting for connection ", waited, "ms");
+         return;
+        }
+      string err = "MT4 not connected";
+      if(StringLen(serverWanted) > 0)
+         err = "MT4 not connected to " + serverWanted + " (check server name / investor password)";
+      if(WriteWholeFile(ResponseFile,
+         "{\"ok\":false,\"error\":\"" + JsonEscape(err) +
+         "\",\"login\":" + IntegerToString(AccountNumber()) +
+         ",\"request_id\":\"" + JsonEscape(requestId) + "\"}"))
+         FileDelete(RequestFile);
+      g_pendingSinceMs = 0;
+      g_pendingRequestId = "";
       return;
      }
 
    long currentLogin = AccountNumber();
-   // Login can still be switching after /login — keep the request and wait.
    if(expectedLogin > 0 && currentLogin != expectedLogin)
      {
-      Print("FinhubBridge waiting for login switch have=", currentLogin,
-            " want=", expectedLogin);
+      if(WriteWholeFile(ResponseFile,
+         "{\"ok\":false,\"error\":\"Logged into wrong account\",\"login\":" +
+         IntegerToString(currentLogin) + ",\"request_id\":\"" + JsonEscape(requestId) + "\"}"))
+         FileDelete(RequestFile);
+      g_pendingSinceMs = 0;
+      g_pendingRequestId = "";
       return;
      }
 
@@ -195,6 +231,8 @@ void HandleRequest()
          ",\"server\":\"" + JsonEscape(AccountServer()) +
          "\",\"request_id\":\"" + JsonEscape(requestId) + "\"}"))
          FileDelete(RequestFile);
+      g_pendingSinceMs = 0;
+      g_pendingRequestId = "";
       return;
      }
 
@@ -210,6 +248,8 @@ void HandleRequest()
          ",\"request_id\":\"" + JsonEscape(requestId) +
          "\",\"deals\":" + deals + "}"))
          FileDelete(RequestFile);
+      g_pendingSinceMs = 0;
+      g_pendingRequestId = "";
       return;
      }
 
@@ -217,6 +257,8 @@ void HandleRequest()
       "{\"ok\":false,\"error\":\"Unknown action\",\"request_id\":\"" +
       JsonEscape(requestId) + "\"}"))
       FileDelete(RequestFile);
+   g_pendingSinceMs = 0;
+   g_pendingRequestId = "";
   }
 
 //+------------------------------------------------------------------+
@@ -229,17 +271,9 @@ int OnInit()
       FileClose(h);
      }
    Print("FinhubBridge OnInit conn=", IsConnected(), " acct=", AccountNumber());
+   // Do not Sleep() here — Sleep is ignored in custom indicators and would
+   // falsely answer "not connected" before login.ini can finish.
    EventSetTimer(MathMax(1, PollEverySeconds));
-
-   // Offline charts may not fire OnTimer/OnCalculate. Block until the
-   // request is consumed (correct login) or timeout.
-   for(int i = 0; i < 180; i++)
-     {
-      HandleRequest();
-      if(!FileIsExist(RequestFile))
-         break;
-      Sleep(1000);
-     }
    HandleRequest();
    return(INIT_SUCCEEDED);
   }

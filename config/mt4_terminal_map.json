@@ -13,9 +13,9 @@
     "Alpari": "C:\\finhubkh\\mt4-brokers\\alpari\\terminal.exe",
     "ForexTime": "C:\\finhubkh\\mt4-brokers\\forextime\\terminal.exe",
     "FXTM": "C:\\finhubkh\\mt4-brokers\\forextime\\terminal.exe",
-    "BlackwellGlobal": "C:\\finhubkh\\mt4-brokers\\blackwell\\terminal.exe",
-    "Blackwellglobal": "C:\\finhubkh\\mt4-brokers\\blackwell\\terminal.exe",
-    "Blackwell": "C:\\finhubkh\\mt4-brokers\\blackwell\\terminal.exe",
+    "BlackwellGlobal": "C:\\finhubkh\\mt4-portable\\terminal.exe",
+    "Blackwellglobal": "C:\\finhubkh\\mt4-portable\\terminal.exe",
+    "Blackwell": "C:\\finhubkh\\mt4-portable\\terminal.exe",
     "MetaQuotes": "C:\\finhubkh\\mt4-brokers\\metaquotes\\terminal.exe"
   }
 }

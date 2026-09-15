@@ -269,6 +269,7 @@ def record_sync_error(
         trading_account_id=trading_account_id,
         payload={
             "last_sync_error": str(error)[:500],
+            "sync_stage": None,
             "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         },
     )
