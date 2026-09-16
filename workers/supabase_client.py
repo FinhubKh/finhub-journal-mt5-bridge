@@ -85,7 +85,7 @@ def fetch_investor_credentials(
 ) -> dict | None:
     url = (
         f"{supabase_url.rstrip('/')}/rest/v1/investor_credentials"
-        f"?select=last_synced_at,broker_server,login,encrypted_password"
+        f"?select=last_synced_at,cashflow_backfill_done_at,broker_server,login,encrypted_password"
         f"&trading_account_id=eq.{trading_account_id}&limit=1"
     )
     res = client.get(url, headers=supabase_headers(service_key), timeout=30.0)
@@ -125,6 +125,37 @@ def fetch_trading_account(
     return rows[0] if rows else None
 
 
+UPSERT_CHUNK = 200
+
+
+def _chunked(items: list, size: int = UPSERT_CHUNK):
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
+
+
+def _post_upsert(
+    client: httpx.Client,
+    *,
+    url: str,
+    service_key: str,
+    rows: list,
+) -> None:
+    if not rows:
+        return
+    for batch in _chunked(rows):
+        res = client.post(
+            url,
+            headers=supabase_headers(
+                service_key,
+                {"Prefer": "resolution=merge-duplicates,return=minimal"},
+            ),
+            json=batch,
+            timeout=60.0,
+        )
+        if res.status_code >= 400:
+            raise RuntimeError(res.text or f"Failed to upsert ({res.status_code})")
+
+
 def upsert_trades(
     client: httpx.Client,
     *,
@@ -146,29 +177,9 @@ def upsert_trades(
     url = f"{supabase_url.rstrip('/')}/rest/v1/trades?on_conflict=account_id,ticket"
     without_r = [{k: v for k, v in row.items() if k != "r_value"} for row in rows]
     with_r = [row for row in rows if "r_value" in row]
-    res = client.post(
-        url,
-        headers=supabase_headers(
-            service_key,
-            {"Prefer": "resolution=merge-duplicates,return=representation"},
-        ),
-        json=without_r,
-        timeout=60.0,
-    )
-    if res.status_code >= 400:
-        raise RuntimeError(res.text or f"Failed to save trades ({res.status_code})")
+    _post_upsert(client, url=url, service_key=service_key, rows=without_r)
     if with_r:
-        r_res = client.post(
-            url,
-            headers=supabase_headers(
-                service_key,
-                {"Prefer": "resolution=merge-duplicates,return=representation"},
-            ),
-            json=with_r,
-            timeout=60.0,
-        )
-        if r_res.status_code >= 400:
-            raise RuntimeError(r_res.text or f"Failed to save trade R ({r_res.status_code})")
+        _post_upsert(client, url=url, service_key=service_key, rows=with_r)
 
     synced_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     _patch_investor_credentials(
@@ -178,7 +189,7 @@ def upsert_trades(
         trading_account_id=trading_account_id,
         payload={"last_synced_at": synced_at, "last_sync_error": None, "sync_stage": None},
     )
-    return {"inserted": len(res.json()), "last_synced_at": synced_at}
+    return {"inserted": len(rows), "last_synced_at": synced_at}
 
 
 def upsert_cashflows(
@@ -204,18 +215,25 @@ def upsert_cashflows(
     if not rows:
         return {"inserted": 0}
     url = f"{supabase_url.rstrip('/')}/rest/v1/account_cashflows?on_conflict=account_id,ticket"
-    res = client.post(
-        url,
-        headers=supabase_headers(
-            service_key,
-            {"Prefer": "resolution=merge-duplicates,return=representation"},
-        ),
-        json=rows,
-        timeout=60.0,
+    _post_upsert(client, url=url, service_key=service_key, rows=rows)
+    return {"inserted": len(rows)}
+
+
+def mark_cashflow_backfill_done(
+    client: httpx.Client,
+    *,
+    supabase_url: str,
+    service_key: str,
+    trading_account_id: str,
+) -> None:
+    done_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    _patch_investor_credentials(
+        client,
+        supabase_url=supabase_url,
+        service_key=service_key,
+        trading_account_id=trading_account_id,
+        payload={"cashflow_backfill_done_at": done_at},
     )
-    if res.status_code >= 400:
-        raise RuntimeError(res.text or f"Failed to save cashflows ({res.status_code})")
-    return {"inserted": len(res.json())}
 
 
 def set_sync_stage(

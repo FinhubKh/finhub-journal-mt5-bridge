@@ -5,8 +5,8 @@ import httpx
 from jobqueue.redis_lock import RedisLock
 from jobqueue.redis_queue import set_job_result
 from workers.supabase_client import (
-    account_has_cashflows,
     fetch_investor_credentials,
+    mark_cashflow_backfill_done,
     record_sync_error,
     record_sync_success,
     set_sync_stage,
@@ -36,16 +36,20 @@ def _resolve_sync_window(
     service_key: str,
     trading_account_id: str,
     lookback_days: int,
-) -> tuple[datetime, datetime, str]:
-    """Returns (date_from, date_to, sync_kind).
+) -> tuple[datetime, datetime, str, bool]:
+    """Returns (date_from, date_to, sync_kind, cashflow_backfill).
 
     sync_kind is "first" (no prior successful sync on record), "incremental"
     (there is a last_synced_at to pull forward from), or "unknown" (the
     credentials lookup itself failed, so we can't tell which — falls back
     to the full lookback window either way).
+
+    cashflow_backfill is True when this sync used the one-shot 365d window and
+    should stamp cashflow_backfill_done_at after a successful completion.
     """
     date_to = datetime.now(timezone.utc)
     full_history_from = date_to - timedelta(days=lookback_days)
+    backfill_from = date_to - timedelta(days=CASHFLOW_BACKFILL_DAYS)
     try:
         creds = fetch_investor_credentials(
             http,
@@ -54,23 +58,22 @@ def _resolve_sync_window(
             trading_account_id=trading_account_id,
         )
         last_synced_at = (creds or {}).get("last_synced_at")
-        has_cashflows = account_has_cashflows(
-            http,
-            supabase_url=supabase_url,
-            service_key=service_key,
-            trading_account_id=trading_account_id,
-        )
-        if not has_cashflows:
-            return date_to - timedelta(days=CASHFLOW_BACKFILL_DAYS), date_to, (
-                "incremental" if last_synced_at else "first"
-            )
-        if last_synced_at:
-            since = datetime.fromisoformat(str(last_synced_at).replace("Z", "+00:00"))
-            date_from = since - timedelta(hours=INCREMENTAL_SYNC_OVERLAP_HOURS)
-            return max(date_from, full_history_from), date_to, "incremental"
-        return full_history_from, date_to, "first"
+        backfill_done = (creds or {}).get("cashflow_backfill_done_at")
+
+        # First sync — always use the capped backfill window once.
+        if not last_synced_at:
+            return backfill_from, date_to, "first", True
+
+        # Accounts that synced trades before this flag existed get one more
+        # 365d pass, then switch to incremental forever (even with zero cashflows).
+        if not backfill_done:
+            return backfill_from, date_to, "incremental", True
+
+        since = datetime.fromisoformat(str(last_synced_at).replace("Z", "+00:00"))
+        date_from = since - timedelta(hours=INCREMENTAL_SYNC_OVERLAP_HOURS)
+        return max(date_from, full_history_from), date_to, "incremental", False
     except Exception:
-        return full_history_from, date_to, "unknown"
+        return full_history_from, date_to, "unknown", False
 
 
 def _mt5_error_detail(mt5) -> str:
@@ -234,6 +237,7 @@ def run_sync_job(
     deals = None
     login_ok = False
     sync_kind = "unknown"
+    cashflow_backfill = False
     error_detail = ""
 
     def _store(result: dict) -> dict:
@@ -243,6 +247,19 @@ def run_sync_job(
             except Exception:
                 pass
         return result
+
+    def _mark_backfill_done() -> None:
+        if not cashflow_backfill:
+            return
+        try:
+            mark_cashflow_backfill_done(
+                http,
+                supabase_url=supabase_url,
+                service_key=service_key,
+                trading_account_id=trading_account_id,
+            )
+        except Exception:
+            pass
 
     try:
         # Resolve sync window + stage updates outside the terminal lock so
@@ -257,7 +274,7 @@ def run_sync_job(
             )
         except Exception:
             pass
-        date_from, date_to, sync_kind = _resolve_sync_window(
+        date_from, date_to, sync_kind, cashflow_backfill = _resolve_sync_window(
             http,
             supabase_url=supabase_url,
             service_key=service_key,
@@ -335,6 +352,7 @@ def run_sync_job(
                     )
                 except Exception:
                     pass
+                _mark_backfill_done()
                 return _store(_sync_result(job, ok=True, count=0))
 
             msg, error_code = {
@@ -385,6 +403,7 @@ def run_sync_job(
                 cashflows=cashflows,
             )
             count += saved_cash.get("inserted", len(cashflows))
+        _mark_backfill_done()
         return _store(_sync_result(job, ok=True, count=count))
     except Exception as exc:
         msg = f"Broker server didn't respond, try again ({type(exc).__name__})"

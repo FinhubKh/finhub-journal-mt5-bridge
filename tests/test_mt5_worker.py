@@ -67,7 +67,15 @@ class FakeLockRedis:
         return 1
 
 
-def _supabase_transport(on_trades=None, *, last_synced_at=None, cashflow_count=0, on_cashflows=None):
+def _supabase_transport(
+    on_trades=None,
+    *,
+    last_synced_at=None,
+    cashflow_backfill_done_at=None,
+    cashflow_count=0,
+    on_cashflows=None,
+    on_credentials_patch=None,
+):
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path.endswith("/trading_accounts"):
@@ -90,17 +98,22 @@ def _supabase_transport(on_trades=None, *, last_synced_at=None, cashflow_count=0
                 on_cashflows(request)
             import json
 
-            return httpx.Response(201, json=json.loads(request.content.decode() or "[]"))
+            return httpx.Response(201, json=[])
         if path.endswith("/trades"):
             if on_trades:
                 on_trades(request)
-            import json
-
-            return httpx.Response(201, json=json.loads(request.content.decode()))
+            return httpx.Response(201, json=[])
         if path.endswith("/investor_credentials"):
             if request.method == "GET":
-                rows = [{"last_synced_at": last_synced_at}] if last_synced_at else []
-                return httpx.Response(200, json=rows)
+                if not last_synced_at and not cashflow_backfill_done_at:
+                    return httpx.Response(200, json=[])
+                row = {
+                    "last_synced_at": last_synced_at,
+                    "cashflow_backfill_done_at": cashflow_backfill_done_at,
+                }
+                return httpx.Response(200, json=[row])
+            if on_credentials_patch:
+                on_credentials_patch(request)
             return httpx.Response(204)
         return httpx.Response(404)
 
@@ -312,6 +325,7 @@ def test_worker_backfills_cashflows_even_after_prior_trade_sync():
     client = httpx.Client(
         transport=_supabase_transport(
             last_synced_at=last_synced_at.isoformat().replace("+00:00", "Z"),
+            cashflow_backfill_done_at=None,
             cashflow_count=0,
         )
     )
@@ -328,10 +342,38 @@ def test_worker_backfills_cashflows_even_after_prior_trade_sync():
         redis_client=FakeLockRedis(),
         lock_wait_seconds=1,
     )
-    # Existing investor accounts already have last_synced_at from trade-only
-    # syncs, so we still backfill until at least one cashflow is stored — capped.
+    # Prior trade sync without cashflow_backfill_done_at → one more 365d pass.
     days = (before - mt5.seen_date_from).days
     assert 300 <= days <= 400
+
+
+def test_worker_uses_incremental_after_cashflow_backfill_done():
+    from datetime import datetime, timedelta, timezone
+
+    last_synced_at = datetime.now(timezone.utc) - timedelta(days=2)
+    client = httpx.Client(
+        transport=_supabase_transport(
+            last_synced_at=last_synced_at.isoformat().replace("+00:00", "Z"),
+            cashflow_backfill_done_at=last_synced_at.isoformat().replace("+00:00", "Z"),
+            cashflow_count=0,
+        )
+    )
+    mt5 = FakeMt5()
+    before = datetime.now(timezone.utc)
+    run_sync_job(
+        job={"trading_account_id": "a1", "login": "1", "password": "p", "server": "S"},
+        mt5=mt5,
+        http=client,
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
+        terminal_path="C:/mt5/terminal64.exe",
+        lookback_days=90,
+        redis_client=FakeLockRedis(),
+        lock_wait_seconds=1,
+    )
+    # Flag set + no cashflows → incremental (~1 day overlap), not another year.
+    days = (before - mt5.seen_date_from).total_seconds() / 86400
+    assert days < 5
 
 
 def test_worker_uses_incremental_window_after_prior_sync():
@@ -341,6 +383,7 @@ def test_worker_uses_incremental_window_after_prior_sync():
     client = httpx.Client(
         transport=_supabase_transport(
             last_synced_at=last_synced_at.isoformat().replace("+00:00", "Z"),
+            cashflow_backfill_done_at=last_synced_at.isoformat().replace("+00:00", "Z"),
             cashflow_count=1,
         )
     )
@@ -386,6 +429,7 @@ def test_worker_reports_no_new_trades_on_incremental_sync_with_no_deals():
     client = httpx.Client(
         transport=_supabase_transport(
             last_synced_at=last_synced_at.isoformat().replace("+00:00", "Z"),
+            cashflow_backfill_done_at=last_synced_at.isoformat().replace("+00:00", "Z"),
             cashflow_count=1,
         )
     )
@@ -577,7 +621,13 @@ def test_verify_keep_alive_leaves_terminal_initialized():
 
 
 def test_sync_keep_alive_leaves_terminal_initialized():
-    client = httpx.Client(transport=_supabase_transport(cashflow_count=1, last_synced_at="2026-01-01T00:00:00Z"))
+    client = httpx.Client(
+        transport=_supabase_transport(
+            cashflow_count=1,
+            last_synced_at="2026-01-01T00:00:00Z",
+            cashflow_backfill_done_at="2026-01-01T00:00:00Z",
+        )
+    )
     mt5 = FakeMt5(
         deals=[
             {

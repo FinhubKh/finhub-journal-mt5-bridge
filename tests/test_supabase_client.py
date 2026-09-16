@@ -47,7 +47,7 @@ def test_resolve_pnl_usd_fallback():
 
 
 def test_upsert_trades_writes_db_and_status():
-    seen = {"urls": []}
+    seen = {"urls": [], "prefer": []}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["urls"].append((request.method, str(request.url)))
@@ -66,7 +66,8 @@ def test_upsert_trades_writes_db_and_status():
         if request.url.path.endswith("/trades"):
             body = json.loads(request.content.decode())
             seen["trade_rows"] = body
-            return httpx.Response(201, json=body)
+            seen["prefer"].append(request.headers.get("prefer", ""))
+            return httpx.Response(201, json=[])
         if request.url.path.endswith("/investor_credentials"):
             seen["status"] = json.loads(request.content.decode())
             return httpx.Response(204)
@@ -99,6 +100,60 @@ def test_upsert_trades_writes_db_and_status():
     assert seen["status"]["last_sync_error"] is None
     trade_posts = [u for m, u in seen["urls"] if m == "POST" and "/trades" in u]
     assert trade_posts and "on_conflict=account_id,ticket" in trade_posts[0]
+    assert any("return=minimal" in p for p in seen["prefer"])
+
+
+def test_upsert_trades_chunks_large_batches():
+    seen = {"batches": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/trading_accounts"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "acct-1",
+                        "user_id": "user-1",
+                        "name": "Live",
+                        "pnl_denomination": "usd",
+                    }
+                ],
+            )
+        if request.url.path.endswith("/trades"):
+            body = json.loads(request.content.decode())
+            seen["batches"] += 1
+            assert len(body) <= 200
+            return httpx.Response(201, json=[])
+        if request.url.path.endswith("/investor_credentials"):
+            return httpx.Response(204)
+        return httpx.Response(404)
+
+    trades = [
+        {
+            "ticket": i,
+            "symbol": "EURUSD",
+            "direction": "buy",
+            "entry_price": 1,
+            "exit_price": 2,
+            "lot_size": 0.1,
+            "pnl_usd": 1,
+            "pnl_raw": 1,
+            "r_value": 0,
+            "open_time": "2026-01-01T10:00:00Z",
+            "close_time": "2026-01-01T11:00:00Z",
+        }
+        for i in range(450)
+    ]
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    result = upsert_trades(
+        client,
+        supabase_url="https://example.supabase.co",
+        service_key="svc",
+        trading_account_id="acct-1",
+        trades=trades,
+    )
+    assert result["inserted"] == 450
+    assert seen["batches"] == 3
 
 
 def test_record_sync_error_patches_credentials():
@@ -155,7 +210,7 @@ def test_upsert_cashflows_writes_deposits():
             )
         if request.url.path.endswith("/account_cashflows"):
             seen["rows"] = json.loads(request.content.decode())
-            return httpx.Response(201, json=seen["rows"])
+            return httpx.Response(201, json=[])
         return httpx.Response(404)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
