@@ -93,11 +93,18 @@ def enqueue_job(redis_client, queue_key: str, job: dict) -> str:
 
     Passwords are never stored in the durable latest-hash — only in a short-TTL
     secret key keyed by job_id (optional; workers can also load from Supabase).
+
+    Priority:
+    - verify jobs always jump the queue (lpush)
+    - sync jobs with priority="front" (incremental refreshes) also lpush so they
+      are not stuck behind long first-sync backfills
+    - other sync jobs append (rpush)
     """
     payload = dict(job)
     if not payload.get("job_id"):
         payload["job_id"] = new_job_id()
     payload["job_type"] = str(payload.get("job_type") or "sync")
+    priority = str(payload.pop("priority", "") or "").strip().lower()
     password = payload.pop("password", None)
     account_id = str(payload["trading_account_id"])
     coalesce_id = _coalesce_id(payload)
@@ -126,8 +133,8 @@ def enqueue_job(redis_client, queue_key: str, job: dict) -> str:
             "job_type": payload["job_type"],
         }
         raw_marker = json.dumps(marker)
-        # Login checks jump the queue so Connect doesn't wait behind a full sync.
-        if payload["job_type"] == "verify":
+        # Login checks and incremental syncs jump ahead of first-sync backfills.
+        if payload["job_type"] == "verify" or priority == "front":
             redis_client.lpush(queue_key, raw_marker)
         else:
             redis_client.rpush(queue_key, raw_marker)
@@ -140,6 +147,61 @@ def queue_depth(redis_client, queue_key: str) -> dict:
         "pending_accounts": redis_client.scard(_pending_key(queue_key)),
         "processing_jobs": redis_client.llen(_processing_key(queue_key)),
     }
+
+
+def queue_ahead(
+    redis_client,
+    queue_key: str,
+    job_id: str,
+    *,
+    trading_account_id: str | None = None,
+    job_type: str | None = None,
+) -> int | None:
+    """Jobs ahead of this job in the pending list (0 = next up). None if not pending.
+
+    Matches by job_id first. If coalesced (marker still has a prior job_id), falls
+    back to trading_account_id + job_type.
+    """
+    try:
+        items = redis_client.lrange(queue_key, 0, -1) if hasattr(redis_client, "lrange") else []
+    except Exception:
+        return None
+    target = str(job_id or "")
+    account = str(trading_account_id) if trading_account_id else ""
+    jtype = str(job_type or "sync")
+    for index, raw in enumerate(items or []):
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        try:
+            marker = json.loads(text)
+        except Exception:
+            continue
+        if target and str(marker.get("job_id") or "") == target:
+            return index
+        if account and str(marker.get("trading_account_id") or "") == account:
+            if str(marker.get("job_type") or "sync") == jtype:
+                return index
+    return None
+
+
+def pending_queue_meta(
+    redis_client,
+    queue_key: str,
+    job_id: str,
+    *,
+    trading_account_id: str | None = None,
+    job_type: str | None = None,
+) -> dict:
+    """queue_ahead / 1-based queue_position for a pending job."""
+    ahead = queue_ahead(
+        redis_client,
+        queue_key,
+        job_id,
+        trading_account_id=trading_account_id,
+        job_type=job_type,
+    )
+    if ahead is None:
+        return {}
+    return {"queue_ahead": ahead, "queue_position": ahead + 1}
 
 
 def claim_job(redis_client, queue_key: str, timeout: int = 5):

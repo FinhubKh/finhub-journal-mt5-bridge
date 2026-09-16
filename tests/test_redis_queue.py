@@ -4,6 +4,8 @@ from jobqueue.redis_queue import (
     claim_job,
     enqueue_job,
     get_job_result,
+    pending_queue_meta,
+    queue_ahead,
     recover_stale_processing,
     set_job_result,
 )
@@ -191,6 +193,41 @@ def test_verify_and_sync_same_account_both_queued():
     # Verify is lpush'd so it is claimed before the already-queued sync.
     assert claim_job(r, "q")["job_type"] == "verify"
     assert claim_job(r, "q")["job_type"] == "sync"
+
+
+def test_incremental_sync_jumps_ahead_of_first_sync():
+    r = FakeRedis()
+    enqueue_job(
+        r,
+        "q",
+        {
+            "job_id": "first-1",
+            "job_type": "sync",
+            "trading_account_id": "a1",
+        },
+    )
+    enqueue_job(
+        r,
+        "q",
+        {
+            "job_id": "incr-1",
+            "job_type": "sync",
+            "trading_account_id": "a2",
+            "priority": "front",
+        },
+    )
+    assert claim_job(r, "q")["job_id"] == "incr-1"
+    assert claim_job(r, "q")["job_id"] == "first-1"
+
+
+def test_queue_ahead_and_pending_meta():
+    r = FakeRedis()
+    j1 = enqueue_job(r, "q", {"job_id": "j1", "trading_account_id": "a1"})
+    j2 = enqueue_job(r, "q", {"job_id": "j2", "trading_account_id": "a2"})
+    assert queue_ahead(r, "q", j1) == 0
+    assert queue_ahead(r, "q", j2) == 1
+    assert pending_queue_meta(r, "q", j2) == {"queue_ahead": 1, "queue_position": 2}
+    assert queue_ahead(r, "q", "missing") is None
 
 
 def test_job_result_roundtrip():

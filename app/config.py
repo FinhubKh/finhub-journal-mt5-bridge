@@ -37,8 +37,8 @@ class Settings(BaseSettings):
     # queued verify/sync job behind the lock.
     mt5_init_timeout_ms: int = 15000
     mt4_init_timeout_ms: int = 45000
-    # Default 2: one worker can write DB while another holds the MT5 lock
-    worker_pool_size: int = 2
+    # Default 4: one worker per terminal slot (overlap DB writes + parallel locks)
+    worker_pool_size: int = 4
     history_lookback_days: int = 90
     bridge_api_host: str = "0.0.0.0"
     bridge_api_port: int = 8788

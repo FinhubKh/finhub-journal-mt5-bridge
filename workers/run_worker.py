@@ -10,7 +10,8 @@ from workers.credentials import CredentialsError, resolve_job_credentials
 from workers.logging_setup import get_logger
 from workers.mt5_worker import run_sync_job, run_verify_job
 from workers.supabase_client import record_sync_error
-from workers.terminal_map import resolve_terminal_path
+from workers.terminal_lock import lock_key_for_terminal
+from workers.terminal_map import pick_terminal_path
 
 
 def _http_client() -> httpx.Client:
@@ -131,25 +132,35 @@ def main() -> None:
             if is_mt4:
                 if not settings.mt4_terminal_path and not settings.mt4_terminal_map_path:
                     raise RuntimeError("MT4_TERMINAL_PATH is not configured on the bridge")
-                terminal_path = resolve_terminal_path(
+                terminal_path = pick_terminal_path(
                     str(job.get("server") or ""),
+                    platform="mt4",
                     default_path=settings.mt4_terminal_path,
                     map_path=settings.mt4_terminal_map_path or None,
+                    redis_client=client,
+                    fallback_lock_key=settings.mt4_lock_key,
                 )
                 if not terminal_path:
                     raise RuntimeError("MT4_TERMINAL_PATH is not configured on the bridge")
-                lock_key = settings.mt4_lock_key
+                lock_key = lock_key_for_terminal(
+                    "mt4", terminal_path, fallback_key=settings.mt4_lock_key
+                )
                 lock_ttl = settings.mt4_lock_ttl_seconds
                 lock_wait = settings.mt4_lock_wait_seconds
                 init_timeout = settings.mt4_init_timeout_ms
                 adapter = mt4
             else:
-                terminal_path = resolve_terminal_path(
+                terminal_path = pick_terminal_path(
                     str(job.get("server") or ""),
+                    platform="mt5",
                     default_path=settings.mt5_terminal_path,
                     map_path=settings.mt5_terminal_map_path or None,
+                    redis_client=client,
+                    fallback_lock_key=settings.mt5_lock_key,
                 )
-                lock_key = settings.mt5_lock_key
+                lock_key = lock_key_for_terminal(
+                    "mt5", terminal_path, fallback_key=settings.mt5_lock_key
+                )
                 lock_ttl = settings.mt5_lock_ttl_seconds
                 lock_wait = settings.mt5_lock_wait_seconds
                 init_timeout = settings.mt5_init_timeout_ms

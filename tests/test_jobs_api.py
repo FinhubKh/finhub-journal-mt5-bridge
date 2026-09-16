@@ -27,6 +27,12 @@ class FakeRedis:
     def llen(self, key):
         return len(self.lists.get(key) or [])
 
+    def lrange(self, key, start, end):
+        items = self.lists.get(key) or []
+        if end == -1:
+            end = len(items) - 1
+        return items[start : end + 1]
+
     def sadd(self, key, value):
         s = self.sets.setdefault(key, set())
         if value in s:
@@ -90,6 +96,8 @@ def test_health():
     assert body["queue"]["pending_accounts"] == 0
     assert body["mt5_lock_held"] is False
     assert "workers_alive" in body
+    assert "terminal_locks" in body
+    assert "mt5_slots" in body["terminal_locks"]
 
 
 def test_health_reports_down_when_redis_unreachable():
@@ -169,9 +177,44 @@ def test_jobs_sync_enqueues_without_password():
     assert res.status_code == 202
     body = res.json()
     assert body["job_id"]
+    assert body["queue_ahead"] == 0
+    assert body["queue_position"] == 1
     assert len(fake.lists["q"]) == 1
     latest = next(iter(fake.hashes["q:latest"].values()))
     assert "password" not in latest
+    pending = fake.kv[f"q:result:{body['job_id']}"]
+    assert '"pending"' in pending
+    assert '"queue_ahead": 0' in pending or '"queue_ahead":0' in pending
+
+
+def test_jobs_sync_reports_queue_ahead_for_second_job():
+    fake = FakeRedis()
+    app = create_app(
+        redis_client=fake,
+        settings_overrides={
+            "bridge_service_token": "tok",
+            "redis_queue_key": "q",
+        },
+    )
+    client = TestClient(app)
+    first = client.post(
+        "/jobs/sync",
+        headers={"x-bridge-token": "tok"},
+        json={"trading_account_id": "a1"},
+    ).json()
+    second = client.post(
+        "/jobs/sync",
+        headers={"x-bridge-token": "tok"},
+        json={"trading_account_id": "a2"},
+    ).json()
+    assert first["queue_ahead"] == 0
+    assert second["queue_ahead"] == 1
+    refreshed = client.get(
+        f"/jobs/{second['job_id']}/result",
+        headers={"x-bridge-token": "tok"},
+    )
+    assert refreshed.status_code == 200
+    assert refreshed.json()["queue_ahead"] == 1
 
 
 def test_jobs_verify_enqueues_and_marks_pending():
