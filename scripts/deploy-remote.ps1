@@ -115,8 +115,22 @@ Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
   }
 Start-Sleep -Seconds 2
 if (-not (Restart-NamedTask "FinhubkhMt5Worker")) {
-  Log "Starting workers.supervisor via process (no FinhubkhMt5Worker task)"
-  Start-Process -FilePath $VenvPy -ArgumentList "-m","workers.supervisor" -WorkingDirectory $Root -WindowStyle Minimized
+  $register = Join-Path $Root "scripts\register-worker-task.ps1"
+  if (Test-Path $register) {
+    Log "Registering missing FinhubkhMt5Worker scheduled task"
+    try {
+      & $register
+      Start-ScheduledTask -TaskName "FinhubkhMt5Worker" -ErrorAction Stop
+      Log "Started FinhubkhMt5Worker scheduled task"
+    } catch {
+      Log ("WARNING: could not register/start FinhubkhMt5Worker: {0}" -f $_.Exception.Message)
+      Log "Starting workers.supervisor via process (fallback)"
+      Start-Process -FilePath $VenvPy -ArgumentList "-m","workers.supervisor" -WorkingDirectory $Root -WindowStyle Minimized
+    }
+  } else {
+    Log "Starting workers.supervisor via process (no FinhubkhMt5Worker task)"
+    Start-Process -FilePath $VenvPy -ArgumentList "-m","workers.supervisor" -WorkingDirectory $Root -WindowStyle Minimized
+  }
 }
 
 # 5) Health
