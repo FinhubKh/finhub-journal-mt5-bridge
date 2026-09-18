@@ -4,13 +4,15 @@
 //| Uses an indicator (not EA) so AutoTrading button is not required |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.04"
+#property version   "1.05"
 #property indicator_chart_window
 #property indicator_buffers 0
 
 input int PollEverySeconds = 2;
 // How long to wait for broker login before answering "not connected".
 input int ConnectWaitSeconds = 120;
+// After posting "All History", wait this long for the server to fill MODE_HISTORY.
+input int HistoryExpandWaitSeconds = 12;
 
 const string RequestFile  = "finhub_bridge_request.json";
 const string ResponseFile = "finhub_bridge_response.json";
@@ -18,6 +20,19 @@ const string AliveFile    = "finhub_bridge_alive.txt";
 
 uint g_pendingSinceMs = 0;
 string g_pendingRequestId = "";
+uint g_historyExpandSinceMs = 0;
+string g_historyExpandRequestId = "";
+bool g_allHistoryPosted = false;
+
+#import "user32.dll"
+   int  GetAncestor(int hWnd, int gaFlags);
+   bool PostMessageA(int hWnd, uint Msg, int wParam, int lParam);
+#import
+
+#define GA_ROOT 2
+#define WM_COMMAND 0x0111
+// Undocumented MT4 command: Account History → All History (forum/MQL community).
+#define CMD_ALL_HISTORY 33058
 
 //+------------------------------------------------------------------+
 string JsonEscape(string s)
@@ -114,10 +129,24 @@ string DealJson(long ticket, long orderId, long positionId, string entry,
   }
 
 //+------------------------------------------------------------------+
-string BuildHistoryDeals(datetime fromTs, datetime toTs)
+void RequestAllAccountHistory()
+  {
+   // Expand Account History beyond the default "Last Month/3 Months" filter
+   // so OrdersHistoryTotal() can see older closed trades.
+   int chart = WindowHandle(Symbol(), Period());
+   if(chart <= 0) return;
+   int root = GetAncestor(chart, GA_ROOT);
+   if(root <= 0) root = chart;
+   PostMessageA(root, WM_COMMAND, CMD_ALL_HISTORY, 0);
+   Print("FinhubBridge posted All History cmd=", CMD_ALL_HISTORY);
+  }
+
+//+------------------------------------------------------------------+
+string BuildHistoryDeals(datetime fromTs, datetime toTs, int &matchedOut)
   {
    string deals = "[";
    bool first = true;
+   matchedOut = 0;
    int total = OrdersHistoryTotal();
    for(int i = 0; i < total; i++)
      {
@@ -138,6 +167,7 @@ string BuildHistoryDeals(datetime fromTs, datetime toTs)
          if(!first) deals += ",";
          deals += row;
          first = false;
+         matchedOut++;
          continue;
         }
 
@@ -160,6 +190,7 @@ string BuildHistoryDeals(datetime fromTs, datetime toTs)
       if(!first) deals += ",";
       deals += inDeal + "," + outDeal;
       first = false;
+      matchedOut++;
      }
    deals += "]";
    return(deals);
@@ -241,15 +272,45 @@ void HandleRequest()
       datetime fromTs = (datetime)JsonGetLong(raw, "from_ts");
       datetime toTs = (datetime)JsonGetLong(raw, "to_ts");
       if(toTs <= 0) toTs = TimeCurrent();
-      if(fromTs <= 0) fromTs = toTs - 90 * 24 * 60 * 60;
-      string deals = BuildHistoryDeals(fromTs, toTs);
+      // Never default to only 90 days — old accounts would look empty.
+      if(fromTs <= 0) fromTs = D'2000.01.01';
+
+      // Expand Account History once per request so older trades are loaded.
+      if(g_historyExpandRequestId != requestId)
+        {
+         g_historyExpandRequestId = requestId;
+         g_historyExpandSinceMs = GetTickCount();
+         g_allHistoryPosted = false;
+        }
+      if(!g_allHistoryPosted)
+        {
+         RequestAllAccountHistory();
+         g_allHistoryPosted = true;
+         g_historyExpandSinceMs = GetTickCount();
+         return;
+        }
+      uint waitMs = (uint)MathMax(3, HistoryExpandWaitSeconds) * 1000;
+      if(GetTickCount() - g_historyExpandSinceMs < waitMs)
+         return;
+
+      int matched = 0;
+      int loaded = OrdersHistoryTotal();
+      string deals = BuildHistoryDeals(fromTs, toTs, matched);
+      Print("FinhubBridge history loaded=", loaded, " matched=", matched,
+            " from=", (long)fromTs, " to=", (long)toTs);
       if(WriteWholeFile(ResponseFile,
          "{\"ok\":true,\"login\":" + IntegerToString(currentLogin) +
          ",\"request_id\":\"" + JsonEscape(requestId) +
-         "\",\"deals\":" + deals + "}"))
+         "\",\"history_loaded\":" + IntegerToString(loaded) +
+         ",\"matched\":" + IntegerToString(matched) +
+         ",\"from_ts\":" + IntegerToString((long)fromTs) +
+         ",\"to_ts\":" + IntegerToString((long)toTs) +
+         ",\"deals\":" + deals + "}"))
          FileDelete(RequestFile);
       g_pendingSinceMs = 0;
       g_pendingRequestId = "";
+      g_historyExpandRequestId = "";
+      g_allHistoryPosted = false;
       return;
      }
 

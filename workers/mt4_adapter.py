@@ -12,12 +12,17 @@ import json
 import os
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 REQUEST_NAME = "finhub_bridge_request.json"
 RESPONSE_NAME = "finhub_bridge_response.json"
+# MT4 Account History → All History (undocumented WM_COMMAND; MQL community).
+MT4_CMD_ALL_HISTORY = 33058
+WM_COMMAND = 0x0111
+HISTORY_CHUNK_DAYS = 90
+ALL_HISTORY_WAIT_SECONDS = 12
 
 
 class _ExternalProc:
@@ -73,6 +78,8 @@ class MetaTrader4Adapter:
         self._server = None
         self._timeout_ms = 15000
         self._session_ready = False
+        self._all_history_requested = False
+        self._last_history_loaded = None
 
     def _files_dir(self) -> Path:
         if self._files_dir_override is not None:
@@ -120,6 +127,8 @@ class MetaTrader4Adapter:
         self._password = password_s
         self._server = server_s
         self._session_ready = False
+        self._all_history_requested = False
+        self._last_history_loaded = None
 
         if not self._terminal_path or not Path(self._terminal_path).is_file():
             self._last_error = (-1, "MT4 terminal path missing or not found")
@@ -158,12 +167,46 @@ class MetaTrader4Adapter:
         self._session_ready = True
         return True
 
-    def history_deals(self, date_from, date_to, on_chunk=None) -> list[dict]:
-        if not self._login:
-            self._last_error = (-1, "MT4 not initialized")
-            return []
+    def _request_all_account_history(self) -> None:
+        """Ask MT4 to load Account History → All History before exporting.
 
-        # Reuse the warm terminal — companion OnTimer/OnCalculate picks up IPC.
+        Without this, OrdersHistoryTotal() often only sees the last month/quarter,
+        so older closed trades never reach the journal.
+        """
+        if os.name != "nt":
+            self._all_history_requested = True
+            return
+        if self._all_history_requested:
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            found = []
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            def _enum(hwnd, _lp):
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                buf = ctypes.create_unicode_buffer(512)
+                user32.GetWindowTextW(hwnd, buf, 512)
+                title = (buf.value or "").lower()
+                if "metatrader" in title or "blackwell" in title or title.startswith("mt4"):
+                    found.append(hwnd)
+                return True
+
+            user32.EnumWindows(_enum, 0)
+            for hwnd in found:
+                user32.PostMessageW(hwnd, WM_COMMAND, MT4_CMD_ALL_HISTORY, 0)
+            if found:
+                time.sleep(ALL_HISTORY_WAIT_SECONDS)
+            self._all_history_requested = True
+        except Exception:
+            # Best-effort — companion EA also posts the same command when DLLs allowed.
+            self._all_history_requested = True
+
+    def _history_deals_once(self, date_from, date_to, on_chunk=None) -> list[dict]:
         self._clear_ipc()
         try:
             self._write_request(
@@ -173,7 +216,7 @@ class MetaTrader4Adapter:
                     "server": self._server,
                     "from_ts": _utc_ts(date_from),
                     "to_ts": _utc_ts(date_to),
-                    "request_id": f"history-{int(time.time())}",
+                    "request_id": f"history-{int(time.time() * 1000)}",
                 }
             )
         except OSError as exc:
@@ -189,7 +232,8 @@ class MetaTrader4Adapter:
             except Exception:
                 pass
 
-        wait_ms = max(int(self._timeout_ms or 15000), 90000)
+        # Allow EA expand-wait (HistoryExpandWaitSeconds) + large JSON write.
+        wait_ms = max(int(self._timeout_ms or 15000), 120000)
         payload = self._wait_response(timeout_ms=wait_ms)
         if not payload:
             self._last_error = (-1, "MT4 history export timed out")
@@ -198,15 +242,66 @@ class MetaTrader4Adapter:
             self._last_error = (-1, str(payload.get("error") or "History export failed"))
             return []
 
+        loaded = payload.get("history_loaded")
+        if loaded is not None:
+            try:
+                self._last_history_loaded = int(loaded)
+            except (TypeError, ValueError):
+                self._last_history_loaded = None
+
         deals = payload.get("deals") or []
         if not isinstance(deals, list):
             self._last_error = (-1, "Invalid MT4 history payload")
             return []
         return [d for d in deals if isinstance(d, dict)]
 
+    def history_deals(self, date_from, date_to, on_chunk=None) -> list[dict]:
+        if not self._login:
+            self._last_error = (-1, "MT4 not initialized")
+            return []
+
+        self._request_all_account_history()
+
+        # Normalize bounds for chunking (ints or datetime).
+        if isinstance(date_from, datetime):
+            start = date_from if date_from.tzinfo else date_from.replace(tzinfo=timezone.utc)
+        else:
+            start = datetime.fromtimestamp(int(date_from), tz=timezone.utc)
+        if isinstance(date_to, datetime):
+            end = date_to if date_to.tzinfo else date_to.replace(tzinfo=timezone.utc)
+        else:
+            end = datetime.fromtimestamp(int(date_to), tz=timezone.utc)
+
+        # Single short window (unit tests / verify follow-ups) — one IPC roundtrip.
+        if (end - start) <= timedelta(days=HISTORY_CHUNK_DAYS + 1):
+            return self._history_deals_once(start, end, on_chunk=on_chunk)
+
+        raw: list[dict] = []
+        seen: set = set()
+        cursor = start
+        chunk = timedelta(days=HISTORY_CHUNK_DAYS)
+        while cursor < end:
+            nxt = min(cursor + chunk, end)
+            batch = self._history_deals_once(cursor, nxt, on_chunk=on_chunk)
+            for deal in batch:
+                ticket = deal.get("ticket")
+                if ticket is None or ticket in seen:
+                    continue
+                seen.add(ticket)
+                raw.append(deal)
+            cursor = nxt
+        if not raw and self._last_history_loaded == 0:
+            self._last_error = (
+                -1,
+                "MT4 Account History is empty — open Account History → All History on the bridge terminal, enable Allow DLL imports on FinhubJournal_BridgeExport, then Sync Now again",
+            )
+        return raw
+
     def shutdown(self, force: bool = True):
         self._clear_ipc()
         self._session_ready = False
+        self._all_history_requested = False
+        self._last_history_loaded = None
         if not force:
             return
         proc = self._process

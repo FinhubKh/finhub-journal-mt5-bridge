@@ -48,6 +48,34 @@ if (Test-Path $Staging) {
   Log "No staging dir - refreshing deps/services only"
 }
 
+# 1b) Refresh MT4 companion indicator so Account History → All History works for old trades.
+$EaSrc = Join-Path $Root "ea\FinhubJournal_BridgeExport.mq4"
+$Mt4Root = "C:\finhubkh\mt4-portable"
+if ((Test-Path $EaSrc) -and (Test-Path $Mt4Root)) {
+  foreach ($sub in @("MQL4\Indicators", "MQL4\Experts")) {
+    $dir = Join-Path $Mt4Root $sub
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $dst = Join-Path $dir "FinhubJournal_BridgeExport.mq4"
+    Copy-Item $EaSrc $dst -Force
+    Log ("Copied companion EA to {0}" -f $dst)
+  }
+  $metaEditor = Join-Path $Mt4Root "metaeditor.exe"
+  $compileTarget = Join-Path $Mt4Root "MQL4\Indicators\FinhubJournal_BridgeExport.mq4"
+  if ((Test-Path $metaEditor) -and (Test-Path $compileTarget)) {
+    Log "Compiling FinhubJournal_BridgeExport.mq4"
+    Start-Process -FilePath $metaEditor -ArgumentList "/compile:$compileTarget" -Wait -NoNewWindow -ErrorAction SilentlyContinue
+    $ex4 = Join-Path $Mt4Root "MQL4\Indicators\FinhubJournal_BridgeExport.ex4"
+    if (Test-Path $ex4) {
+      Copy-Item $ex4 (Join-Path $Mt4Root "MQL4\Experts\FinhubJournal_BridgeExport.ex4") -Force -ErrorAction SilentlyContinue
+      Log "Compiled FinhubJournal_BridgeExport.ex4"
+    } else {
+      Log "WARNING: metaeditor did not produce .ex4 — recompile in MetaEditor on the VM if MT4 history stays empty"
+    }
+  }
+} else {
+  Log "Skip EA refresh (missing $EaSrc or $Mt4Root)"
+}
+
 # 2) Dependencies (venv only)
 Log "pip install -r requirements.txt"
 & $Pip install -r "$Root\requirements.txt"

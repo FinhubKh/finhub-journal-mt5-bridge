@@ -27,6 +27,11 @@ DEFAULT_HISTORY_BACKFILL_DAYS = 7300
 
 NO_TRADES_EVER_MSG = "No trade history found — this account hasn't placed any trades yet"
 NO_TRADES_UNKNOWN_MSG = "No closed trades found in lookback window"
+NO_TRADES_MT4_HISTORY_MSG = (
+    "No closed trades found in MT4 Account History. On the bridge terminal open "
+    "Account History → right-click → All History, enable Allow DLL imports on "
+    "FinhubJournal_BridgeExport, then Sync Now again."
+)
 
 
 def _resolve_sync_window(
@@ -362,6 +367,23 @@ def run_sync_job(
             msg, error_code = {
                 "first": (NO_TRADES_EVER_MSG, "no_trades"),
             }.get(sync_kind, (NO_TRADES_UNKNOWN_MSG, "no_trades"))
+            # MT4 only exports what Account History has loaded — surface that clearly.
+            platform = str(job.get("platform") or "").lower()
+            last_error = getattr(mt5, "last_error", None)
+            if callable(last_error):
+                try:
+                    code, desc = last_error()
+                    text = str(desc or "")
+                    if code not in (0, 1) and text and text.upper() != "OK":
+                        if "Account History" in text or "history export" in text.lower():
+                            msg = text
+                except Exception:
+                    pass
+            if platform == "mt4" and msg == NO_TRADES_EVER_MSG:
+                msg = NO_TRADES_MT4_HISTORY_MSG
+            loaded = getattr(mt5, "_last_history_loaded", None)
+            if platform == "mt4" and loaded == 0:
+                msg = NO_TRADES_MT4_HISTORY_MSG
             record_sync_error(
                 http,
                 supabase_url=supabase_url,
