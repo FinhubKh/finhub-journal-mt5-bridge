@@ -20,9 +20,9 @@ LOGIN_FAILED_MSG = "Login failed — check broker server, MetaTrader login, and 
 # Re-pull a little before the last successful sync in case a deal settled
 # late or a prior sync was cut short, without re-walking the full history.
 INCREMENTAL_SYNC_OVERLAP_HOURS = 24
-# Cap first / cashflow backfill so one account cannot hold the terminal lock
-# for a multi-year walk. Older history can be filled by a later sync job.
-CASHFLOW_BACKFILL_DAYS = 365
+# One-shot first sync walks this far back (default ~20y ≈ full retail history).
+# Later Sync Now stays incremental. Override via HISTORY_BACKFILL_DAYS.
+DEFAULT_HISTORY_BACKFILL_DAYS = 7300
 
 
 NO_TRADES_EVER_MSG = "No trade history found — this account hasn't placed any trades yet"
@@ -36,6 +36,7 @@ def _resolve_sync_window(
     service_key: str,
     trading_account_id: str,
     lookback_days: int,
+    backfill_days: int = DEFAULT_HISTORY_BACKFILL_DAYS,
 ) -> tuple[datetime, datetime, str, bool]:
     """Returns (date_from, date_to, sync_kind, cashflow_backfill).
 
@@ -44,12 +45,13 @@ def _resolve_sync_window(
     credentials lookup itself failed, so we can't tell which — falls back
     to the full lookback window either way).
 
-    cashflow_backfill is True when this sync used the one-shot 365d window and
-    should stamp cashflow_backfill_done_at after a successful completion.
+    cashflow_backfill is True when this sync used the one-shot full-history
+    window and should stamp cashflow_backfill_done_at after success.
     """
     date_to = datetime.now(timezone.utc)
     full_history_from = date_to - timedelta(days=lookback_days)
-    backfill_from = date_to - timedelta(days=CASHFLOW_BACKFILL_DAYS)
+    days = max(1, int(backfill_days or DEFAULT_HISTORY_BACKFILL_DAYS))
+    backfill_from = date_to - timedelta(days=days)
     try:
         creds = fetch_investor_credentials(
             http,
@@ -60,12 +62,12 @@ def _resolve_sync_window(
         last_synced_at = (creds or {}).get("last_synced_at")
         backfill_done = (creds or {}).get("cashflow_backfill_done_at")
 
-        # First sync — always use the capped backfill window once.
+        # First sync — pull full history once (chunked under the terminal lock).
         if not last_synced_at:
             return backfill_from, date_to, "first", True
 
-        # Accounts that synced trades before this flag existed get one more
-        # 365d pass, then switch to incremental forever (even with zero cashflows).
+        # Accounts that synced before the flag existed get one more full pass,
+        # then switch to incremental forever (even with zero cashflows).
         if not backfill_done:
             return backfill_from, date_to, "incremental", True
 
@@ -223,6 +225,7 @@ def run_sync_job(
     service_key: str,
     terminal_path: str,
     lookback_days: int,
+    backfill_days: int = DEFAULT_HISTORY_BACKFILL_DAYS,
     redis_client=None,
     queue_key: str = "finhubkh:mt5:sync_jobs",
     lock_key: str = "finhubkh:mt5:terminal_lock",
@@ -280,6 +283,7 @@ def run_sync_job(
             service_key=service_key,
             trading_account_id=trading_account_id,
             lookback_days=lookback_days,
+            backfill_days=backfill_days,
         )
 
         if redis_client is not None:

@@ -289,14 +289,14 @@ def test_worker_backfills_cashflows_for_existing_investor_account():
         lock_wait_seconds=1,
     )
     assert result["ok"] is True
-    # Capped first/cashflow backfill window (not a full 10-year walk under lock).
+    # One-shot full-history backfill (~20y default), not a short 365d window.
     days = (before - mt5.seen_date_from).days
-    assert 300 <= days <= 400
+    assert 7000 <= days <= 7400
     assert seen["payload"][0]["op_type"] == "deposit"
     assert seen["payload"][0]["amount"] == 5000
 
 
-def test_worker_uses_capped_lookback_on_first_sync():
+def test_worker_uses_full_history_on_first_sync():
     client = httpx.Client(transport=_supabase_transport())
     mt5 = FakeMt5()
     from datetime import datetime, timezone
@@ -313,9 +313,9 @@ def test_worker_uses_capped_lookback_on_first_sync():
         redis_client=FakeLockRedis(),
         lock_wait_seconds=1,
     )
-    # No last_synced_at and no cashflows yet -> capped backfill (default 365d).
+    # No last_synced_at -> full history backfill (~20y).
     days = (before - mt5.seen_date_from).days
-    assert 300 <= days <= 400
+    assert 7000 <= days <= 7400
 
 
 def test_worker_backfills_cashflows_even_after_prior_trade_sync():
@@ -342,9 +342,9 @@ def test_worker_backfills_cashflows_even_after_prior_trade_sync():
         redis_client=FakeLockRedis(),
         lock_wait_seconds=1,
     )
-    # Prior trade sync without cashflow_backfill_done_at → one more 365d pass.
+    # Prior trade sync without cashflow_backfill_done_at → one more full-history pass.
     days = (before - mt5.seen_date_from).days
-    assert 300 <= days <= 400
+    assert 7000 <= days <= 7400
 
 
 def test_worker_uses_incremental_after_cashflow_backfill_done():

@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     # Default 4: one worker per terminal slot (overlap DB writes + parallel locks)
     worker_pool_size: int = 4
     history_lookback_days: int = 90
+    # One-shot first sync / cashflow backfill window (~20 years ≈ full history).
+    history_backfill_days: int = 7300
     bridge_api_host: str = "0.0.0.0"
     bridge_api_port: int = 8788
     mt5_lock_key: str = "finhubkh:mt5:terminal_lock"
