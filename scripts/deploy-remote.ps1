@@ -69,7 +69,7 @@ if ((Test-Path $EaSrc) -and (Test-Path $Mt4Root)) {
       Copy-Item $ex4 (Join-Path $Mt4Root "MQL4\Experts\FinhubJournal_BridgeExport.ex4") -Force -ErrorAction SilentlyContinue
       Log "Compiled FinhubJournal_BridgeExport.ex4"
     } else {
-      Log "WARNING: metaeditor did not produce .ex4 — recompile in MetaEditor on the VM if MT4 history stays empty"
+      Log "WARNING: metaeditor did not produce .ex4 - recompile in MetaEditor on the VM if MT4 history stays empty"
     }
   }
 } else {
